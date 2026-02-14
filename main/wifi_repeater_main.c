@@ -88,6 +88,10 @@ static repeater_config_t s_cfg;
 static TaskHandle_t s_mac_task_handle = NULL;
 static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom MAC */
 
+/* Forward declarations */
+static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip);
+static void ap_restore_management_ip(void);
+
 /* ══════════════════════════════════════════════════════════════
  *  L2 Packet Forwarding
  *
@@ -346,6 +350,11 @@ static void mac_change_task(void *pvParams)
         esp_netif_dhcpc_start(s_sta_netif);
         ESP_LOGI(TAG, "  DHCP client re-enabled");
 
+        /* 5b. Przywróć AP do 192.168.4.1 z DHCP (fallback dostępu do GUI).
+         *     Po uzyskaniu IP_EVENT_STA_GOT_IP, AP przełączy się
+         *     automatycznie na podsieć upstream. */
+        ap_restore_management_ip();
+
         /* 6. Reconnect — odblokuj BSSID, pozwól na pełny scan */
         {
             wifi_config_t current_cfg;
@@ -516,6 +525,35 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
+/* Przełącz AP na podsieć upstream — zbridgowani klienci
+ * widzą GUI pod tym samym IP co ESP STA. */
+static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip)
+{
+    esp_netif_dhcps_stop(s_ap_netif);          /* wyłącz DHCP — upstream DHCP obsługuje klientów */
+    esp_netif_ip_info_t ap_ip = {
+        .ip      = sta_ip->ip,                 /* ten sam IP co STA */
+        .netmask = sta_ip->netmask,
+        .gw      = { .addr = 0 },              /* AP nie potrzebuje GW */
+    };
+    esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+    ESP_LOGI(TAG, "AP IP mirrored to " IPSTR " (same subnet as upstream)",
+             IP2STR(&ap_ip.ip));
+}
+
+/* Przywróć AP do 192.168.4.1 z DHCP (tryb setup/fallback). */
+static void ap_restore_management_ip(void)
+{
+    esp_netif_dhcps_stop(s_ap_netif);
+    esp_netif_ip_info_t ap_ip = {
+        .ip      = { .addr = ESP_IP4TOADDR(192, 168, 4, 1) },
+        .netmask = { .addr = ESP_IP4TOADDR(255, 255, 255, 0) },
+        .gw      = { .addr = ESP_IP4TOADDR(192, 168, 4, 1) },
+    };
+    esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+    esp_netif_dhcps_start(s_ap_netif);
+    ESP_LOGI(TAG, "AP IP restored to 192.168.4.1 (setup mode, DHCP ON)");
+}
+
 static void ip_event_handler(void *arg, esp_event_base_t base,
                              int32_t id, void *data)
 {
@@ -524,6 +562,12 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         ESP_LOGI(TAG, "=== Got IP: " IPSTR " gw: " IPSTR " ===",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
         xEventGroupSetBits(s_wifi_event_group, STA_CONNECTED_BIT);
+
+        /* Przełącz AP na podsieć upstream — GUI dostępne pod STA IP */
+        ap_mirror_sta_ip(&ev->ip_info);
+    } else if (id == IP_EVENT_STA_LOST_IP) {
+        ESP_LOGW(TAG, "STA lost IP, restoring AP management subnet");
+        ap_restore_management_ip();
     }
 }
 
@@ -605,10 +649,12 @@ static void init_wifi(void)
     s_ap_netif  = esp_netif_create_default_wifi_ap();
     assert(s_sta_netif && s_ap_netif);
 
-    /* Wyłącz DHCP server na AP — klienci dostaną IP z upstream DHCP
-     * (przez bridging). Zostawiamy IP 192.168.4.1 na AP jako
-     * management interface do HTTP config GUI. */
-    esp_netif_dhcps_stop(s_ap_netif);
+    /* AP DHCP server ON przy starcie (tryb konfiguracji).
+     * Zanim STA połączy się z routerem, klient AP dostaje
+     * 192.168.4.x i konfiguruje repeater pod http://192.168.4.1
+     * Po uzyskaniu IP z upstream (IP_EVENT_STA_GOT_IP),
+     * AP IP zmienia się na tę samą podsieć co upstream —
+     * dzięki temu zbridgowany klient osiąga GUI bez zmiany IP. */
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
@@ -670,7 +716,7 @@ static void init_wifi(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, ip_event_handler, NULL, NULL));
+        IP_EVENT, ESP_EVENT_ANY_ID, ip_event_handler, NULL, NULL));
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -710,6 +756,8 @@ void app_main(void)
     ESP_LOGI(TAG, "  Repeater: %s", s_cfg.ap_ssid);
     ESP_LOGI(TAG, "  TX Power: %d dBm, Max clients: %d",
              s_cfg.tx_power_dbm, s_cfg.max_clients);
+    ESP_LOGI(TAG, "  Config GUI: http://192.168.4.1 (before upstream connect)");
+    ESP_LOGI(TAG, "              After upstream connect: same IP as STA");
 
     /* Start HTTP config server (if enabled in menuconfig) */
     repeater_httpd_start();
