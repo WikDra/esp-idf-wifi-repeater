@@ -121,7 +121,15 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
         return ESP_OK;
     }
 
-    /* Unicast: tylko forward, nie dawaj do stosu (DHCP client wyłączony) */
+    /* Unicast do NASZEGO MAC (STA) — podaj do stosu lwIP
+     * (HTTP config GUI, ping, itp. z upstream sieci) */
+    if (memcmp(dst, s_original_sta_mac, 6) == 0 ||
+        memcmp(dst, s_client_mac, 6) == 0) {
+        esp_netif_receive(s_sta_netif, buffer, len, eb);
+        return ESP_OK;
+    }
+
+    /* Unicast do klienta: tylko forward */
     esp_wifi_internal_free_rx_buffer(eb);
     return ESP_OK;
 }
@@ -133,12 +141,29 @@ static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
         return ESP_OK;
     }
 
-    /* Forward WSZYSTKO upstream przez STA */
+    uint8_t *dst = (uint8_t *)buffer;
+
+    /* Broadcast/multicast — forward upstream + podaj do stosu AP */
+    if (dst[0] & 0x01) {
+        if (s_sta_connected) {
+            esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
+        }
+        esp_netif_receive(s_ap_netif, buffer, len, eb);
+        return ESP_OK;
+    }
+
+    /* Unicast do NASZEGO MAC (AP) — podaj do stosu lwIP
+     * (HTTP config GUI pod 192.168.4.1, ARP, itp.) */
+    if (memcmp(dst, s_ap_mac, 6) == 0) {
+        esp_netif_receive(s_ap_netif, buffer, len, eb);
+        return ESP_OK;
+    }
+
+    /* Unicast do upstream — forward przez STA */
     if (s_sta_connected) {
         esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
     }
 
-    /* Nie dawaj do stosu AP (DHCP server wyłączony, AP nie potrzebuje przetwarzać) */
     esp_wifi_internal_free_rx_buffer(eb);
     return ESP_OK;
 }
@@ -580,12 +605,10 @@ static void init_wifi(void)
     s_ap_netif  = esp_netif_create_default_wifi_ap();
     assert(s_sta_netif && s_ap_netif);
 
-    /* Wyłącz DHCP server na AP — klienci dostaną IP z upstream DHCP */
+    /* Wyłącz DHCP server na AP — klienci dostaną IP z upstream DHCP
+     * (przez bridging). Zostawiamy IP 192.168.4.1 na AP jako
+     * management interface do HTTP config GUI. */
     esp_netif_dhcps_stop(s_ap_netif);
-
-    /* Wyłącz też IP na AP (nie potrzebuje 192.168.4.x) */
-    esp_netif_ip_info_t ip_info = { 0 };
-    esp_netif_set_ip_info(s_ap_netif, &ip_info);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
