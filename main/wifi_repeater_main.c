@@ -46,6 +46,7 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "lwip/inet.h"
 #include "repeater_config.h"
 #include "repeater_httpd.h"
 
@@ -91,6 +92,7 @@ static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom 
 /* Forward declarations */
 static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip);
 static void ap_restore_management_ip(void);
+static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len);
 
 /* ══════════════════════════════════════════════════════════════
  *  L2 Packet Forwarding
@@ -114,6 +116,9 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
     }
 
     uint8_t *dst = (uint8_t *)buffer;
+
+    /* Sniff DHCP ACK (router → client) — learn subnet for AP IP */
+    sniff_dhcp_ack_and_set_ap_ip((const uint8_t *)buffer, len);
 
     /* Forward WSZYSTKO do klienta na AP */
     esp_wifi_internal_tx(WIFI_IF_AP, buffer, len);
@@ -525,10 +530,139 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
+/* ══════════════════════════════════════════════════════════════
+ *  DHCP ACK Sniffer — learn client subnet from bridged DHCP
+ *
+ *  Podczas bridgingu STA DHCP jest wyłączony (żeby nie kolidował
+ *  z klientem). Pakiety DHCP routera przechodzą przez bridge
+ *  do telefonu. Sniffujemy DHCP ACK żeby poznać podsieć klienta
+ *  i ustawić AP na użyteczny IP w tej samej podsieci.
+ * ══════════════════════════════════════════════════════════════ */
+static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
+{
+    /* Minimum: ETH(14) + IP(20) + UDP(8) + DHCP(240+4 cookie) = 286 */
+    if (len < 286) return;
+
+    /* EtherType = IPv4 (0x0800) */
+    if (data[12] != 0x08 || data[13] != 0x00) return;
+
+    /* IP header */
+    const uint8_t *ip_hdr = data + 14;
+    uint8_t ip_ihl = (ip_hdr[0] & 0x0F) * 4;
+    if (ip_hdr[9] != 17) return;  /* not UDP */
+    if (14 + ip_ihl + 8 > len) return;
+
+    /* UDP: src=67 (DHCP server) dst=68 (DHCP client) */
+    const uint8_t *udp_hdr = ip_hdr + ip_ihl;
+    uint16_t src_port = (udp_hdr[0] << 8) | udp_hdr[1];
+    uint16_t dst_port = (udp_hdr[2] << 8) | udp_hdr[3];
+    if (src_port != 67 || dst_port != 68) return;
+
+    /* DHCP message */
+    const uint8_t *dhcp = udp_hdr + 8;
+    int dhcp_len = len - 14 - ip_ihl - 8;
+    if (dhcp_len < 240) return;
+    if (dhcp[0] != 2) return;  /* not BOOTREPLY */
+
+    /* Magic cookie 0x63825363 at offset 236 */
+    if (dhcp[236] != 0x63 || dhcp[237] != 0x82 ||
+        dhcp[238] != 0x53 || dhcp[239] != 0x63) return;
+
+    /* Parse DHCP options — szukamy: type=53 ACK, subnet=1, router=3 */
+    const uint8_t *opt = dhcp + 240;
+    int opt_max = dhcp_len - 240;
+    bool is_ack = false;
+    uint32_t subnet_mask = 0;
+    uint32_t gateway = 0;
+
+    for (int i = 0; i < opt_max; ) {
+        uint8_t type = opt[i];
+        if (type == 255) break;           /* End */
+        if (type == 0) { i++; continue; } /* Pad */
+        if (i + 1 >= opt_max) break;
+        uint8_t olen = opt[i + 1];
+        if (i + 2 + olen > opt_max) break;
+
+        switch (type) {
+        case 53: /* DHCP Message Type */
+            if (olen == 1 && opt[i + 2] == 5) is_ack = true;
+            break;
+        case 1:  /* Subnet Mask */
+            if (olen == 4) memcpy(&subnet_mask, &opt[i + 2], 4);
+            break;
+        case 3:  /* Router */
+            if (olen >= 4) memcpy(&gateway, &opt[i + 2], 4);
+            break;
+        }
+        i += 2 + olen;
+    }
+
+    if (!is_ack) return;
+
+    /* yiaddr (assigned client IP) at DHCP offset 16 */
+    uint32_t client_ip_n;   /* network byte order */
+    memcpy(&client_ip_n, &dhcp[16], 4);
+    if (client_ip_n == 0 || subnet_mask == 0) return;
+
+    ESP_LOGI(TAG, "DHCP ACK sniffed: client=" IPSTR " mask=" IPSTR " gw=" IPSTR,
+             IP2STR((esp_ip4_addr_t *)&client_ip_n),
+             IP2STR((esp_ip4_addr_t *)&subnet_mask),
+             IP2STR((esp_ip4_addr_t *)&gateway));
+
+    /* Wybierz IP dla AP: najwyższy użyteczny adres w podsieci
+     * (broadcast - 1), omijając IP klienta i gateway */
+    uint32_t h_client = ntohl(client_ip_n);
+    uint32_t h_mask   = ntohl(subnet_mask);
+    uint32_t h_gw     = ntohl(gateway);
+    uint32_t network  = h_client & h_mask;
+    uint32_t bcast    = network | ~h_mask;
+
+    uint32_t candidate = bcast - 1; /* np. x.x.x.254 dla /24 */
+    for (int tries = 0; tries < 10; tries++) {
+        if (candidate > network && candidate < bcast &&
+            candidate != h_client && candidate != h_gw) {
+            break;
+        }
+        candidate--;
+    }
+    /* Safety: jeśli nie znaleziono, użyj client - 1 */
+    if (candidate <= network || candidate >= bcast) {
+        candidate = h_client - 1;
+        if (candidate <= network) candidate = h_client + 1;
+    }
+
+    esp_netif_ip_info_t ap_ip = {
+        .ip      = { .addr = htonl(candidate) },
+        .netmask = { .addr = subnet_mask },
+        .gw      = { .addr = gateway },
+    };
+
+    esp_netif_dhcps_stop(s_ap_netif);
+    esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+
+    ESP_LOGI(TAG, "AP IP set to " IPSTR " (reachable from bridged client on same subnet)",
+             IP2STR(&ap_ip.ip));
+}
+
 /* Przełącz AP na podsieć upstream — zbridgowani klienci
- * widzą GUI pod tym samym IP co ESP STA. */
+ * widzą GUI pod tym samym IP co ESP STA.
+ * Uwaga: ignoruje link-local 169.254.x.x (dummy IP z bridgingu). */
 static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip)
 {
+    /* Skip link-local (dummy set when STA DHCP off during bridging) */
+    uint8_t first_octet = esp_ip4_addr1(&sta_ip->ip);
+    uint8_t second_octet = esp_ip4_addr2(&sta_ip->ip);
+    if (first_octet == 169 && second_octet == 254) {
+        ESP_LOGW(TAG, "Ignoring link-local STA IP " IPSTR " — waiting for DHCP ACK sniff",
+                 IP2STR(&sta_ip->ip));
+        return;
+    }
+    /* Skip zeroed IPs */
+    if (sta_ip->ip.addr == 0) {
+        ESP_LOGW(TAG, "Ignoring zero STA IP");
+        return;
+    }
+
     esp_netif_dhcps_stop(s_ap_netif);          /* wyłącz DHCP — upstream DHCP obsługuje klientów */
     esp_netif_ip_info_t ap_ip = {
         .ip      = sta_ip->ip,                 /* ten sam IP co STA */
