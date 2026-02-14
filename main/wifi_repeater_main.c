@@ -32,7 +32,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -45,7 +44,6 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
-#include "esp_attr.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -84,12 +82,6 @@ static esp_netif_t *s_ap_netif = NULL;
 static TaskHandle_t s_mac_task_handle = NULL;
 static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom MAC */
 
-/* ── Throughput counters (atomic, accessed from ISR-like context) ──── */
-static volatile uint32_t s_rx_packets = 0;    /* STA rx -> AP (downstream to client) */
-static volatile uint32_t s_tx_packets = 0;    /* AP rx -> STA (upstream from client) */
-static volatile uint32_t s_rx_bytes = 0;
-static volatile uint32_t s_tx_bytes = 0;
-
 /* ══════════════════════════════════════════════════════════════
  *  L2 Packet Forwarding
  *
@@ -104,7 +96,7 @@ static volatile uint32_t s_tx_bytes = 0;
  *    - Normalna praca, forwarding wyłączony
  * ══════════════════════════════════════════════════════════════ */
 
-static IRAM_ATTR esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
+static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
 {
     if (!buffer || len < 14) {
         esp_wifi_internal_free_rx_buffer(eb);
@@ -115,8 +107,6 @@ static IRAM_ATTR esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
 
     /* Forward WSZYSTKO do klienta na AP */
     esp_wifi_internal_tx(WIFI_IF_AP, buffer, len);
-    s_rx_packets++;
-    s_rx_bytes += len;
 
     /* Broadcast/multicast: podaj też do naszego stosu lwIP
      * (np. ARP, mDNS — przydatne dla diagnostyki) */
@@ -130,7 +120,7 @@ static IRAM_ATTR esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
     return ESP_OK;
 }
 
-static IRAM_ATTR esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
+static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
 {
     if (!buffer || len < 14) {
         esp_wifi_internal_free_rx_buffer(eb);
@@ -140,8 +130,6 @@ static IRAM_ATTR esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
     /* Forward WSZYSTKO upstream przez STA */
     if (s_sta_connected) {
         esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
-        s_tx_packets++;
-        s_tx_bytes += len;
     }
 
     /* Nie dawaj do stosu AP (DHCP server wyłączony, AP nie potrzebuje przetwarzać) */
@@ -157,8 +145,6 @@ static void forwarding_start(void)
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_internal_reg_rxcb(WIFI_IF_STA, on_sta_rx);
     esp_wifi_internal_reg_rxcb(WIFI_IF_AP, on_ap_rx);
-    s_rx_packets = s_tx_packets = 0;
-    s_rx_bytes = s_tx_bytes = 0;
     s_forwarding_active = true;
 }
 
@@ -533,9 +519,6 @@ static void print_wifi6_info(void)
 
 static void status_task(void *pv)
 {
-    uint32_t prev_rx_bytes = 0, prev_tx_bytes = 0;
-    int64_t prev_time = esp_timer_get_time();
-
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(30000));
 
@@ -577,25 +560,6 @@ static void status_task(void *pv)
             }
         }
         ESP_LOGI(TAG, "  Forwarding: %s", s_forwarding_active ? "ON" : "OFF");
-
-        /* Throughput stats */
-        if (s_forwarding_active) {
-            int64_t now = esp_timer_get_time();
-            float dt = (now - prev_time) / 1000000.0f;
-            if (dt > 0) {
-                uint32_t cur_rx = s_rx_bytes, cur_tx = s_tx_bytes;
-                float rx_kbps = ((cur_rx - prev_rx_bytes) * 8.0f) / (dt * 1000.0f);
-                float tx_kbps = ((cur_tx - prev_tx_bytes) * 8.0f) / (dt * 1000.0f);
-                ESP_LOGI(TAG, "  ↓ Down: %" PRIu32 " pkts, %.1f kbps", s_rx_packets, rx_kbps);
-                ESP_LOGI(TAG, "  ↑ Up:   %" PRIu32 " pkts, %.1f kbps", s_tx_packets, tx_kbps);
-                prev_rx_bytes = cur_rx;
-                prev_tx_bytes = cur_tx;
-            }
-            prev_time = now;
-        } else {
-            prev_rx_bytes = prev_tx_bytes = 0;
-            prev_time = esp_timer_get_time();
-        }
         ESP_LOGI(TAG, "---");
     }
 }
