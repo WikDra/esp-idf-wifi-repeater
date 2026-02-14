@@ -2,31 +2,30 @@ menu "WiFi 6 Repeater Configuration"
 
     menu "Upstream AP (STA) Settings"
         config REPEATER_UPSTREAM_SSID
-            string "Upstream AP SSID"
+            string "Upstream AP SSID (default)"
             default "MyUpstreamAP"
             help
-                SSID sieci WiFi do której repeater się łączy (upstream AP).
+                Domyślny SSID upstream AP. Nadpisywany przez NVS / web GUI.
 
         config REPEATER_UPSTREAM_PASSWORD
-            string "Upstream AP Password"
+            string "Upstream AP Password (default)"
             default "password123"
             help
-                Hasło do upstream AP.
+                Domyślne hasło upstream AP. Nadpisywane przez NVS / web GUI.
     endmenu
 
     menu "Repeater AP Settings"
         config REPEATER_AP_SSID
-            string "Repeater AP SSID"
+            string "Repeater AP SSID (default)"
             default "MyRepeater"
             help
-                SSID sieci WiFi tworzonej przez repeater.
-                Klienci łączą się z tym SSID.
+                Domyślny SSID AP repeatera. Nadpisywany przez NVS / web GUI.
 
         config REPEATER_AP_PASSWORD
-            string "Repeater AP Password"
+            string "Repeater AP Password (default)"
             default "repeater123"
             help
-                Hasło do AP repeatera. Minimum 8 znaków lub puste (open).
+                Domyślne hasło AP. Nadpisywane przez NVS / web GUI.
 
         config REPEATER_MAX_CLIENTS
             int "Max connected clients"
@@ -38,12 +37,30 @@ menu "WiFi 6 Repeater Configuration"
 
     menu "Radio Settings"
         config REPEATER_TX_POWER
-            int "TX Power (dBm)"
+            int "TX Power (dBm, default)"
             range 2 20
             default 20
             help
-                Moc nadawania WiFi w dBm.
-                20 dBm = maksymalna moc, 8 dBm = niska moc.
+                Domyślna moc nadawania WiFi w dBm. Nadpisywana przez NVS / web GUI.
+    endmenu
+
+    menu "HTTP Configuration Server"
+        config REPEATER_HTTPD_ENABLE
+            bool "Enable HTTP configuration server"
+            default y
+            help
+                Włącza wbudowany serwer HTTP do konfiguracji repeatera
+                przez przeglądarkę. Dostępny pod adresem IP repeatera
+                gdy STA jest połączone z upstream AP (w trybie IDLE).
+                Port 80.
+
+        config REPEATER_HTTPD_PORT
+            int "HTTP server port"
+            depends on REPEATER_HTTPD_ENABLE
+            default 80
+            range 1 65535
+            help
+                Port serwera HTTP konfiguracyjnego.
     endmenu
 
 endmenu

@@ -46,6 +46,8 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "repeater_config.h"
+#include "repeater_httpd.h"
 
 static const char *TAG = "wifi6_rep";
 
@@ -70,14 +72,18 @@ typedef enum {
     STATE_MAC_RESTORING,     /* przywracanie oryginalnego MAC */
 } repeater_state_t;
 
-static volatile repeater_state_t s_state = STATE_IDLE;
-static volatile bool s_sta_connected = false;
-static volatile bool s_forwarding_active = false;
-static volatile bool s_mac_cloned = false;
+/* Non-static: accessed by repeater_httpd.c via extern for /status endpoint */
+volatile repeater_state_t s_state = STATE_IDLE;
+volatile bool s_sta_connected = false;
+volatile bool s_forwarding_active = false;
+volatile bool s_mac_cloned = false;
 static volatile bool s_suppress_auto_reconnect = false;  /* blokuj auto-reconnect podczas zmiany MAC */
 
-static esp_netif_t *s_sta_netif = NULL;
+esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
+
+/* Runtime config loaded from NVS (or menuconfig defaults) */
+static repeater_config_t s_cfg;
 
 static TaskHandle_t s_mac_task_handle = NULL;
 static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom MAC */
@@ -593,11 +599,9 @@ static void init_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
-    /* STA config */
+    /* STA config — from NVS runtime config */
     wifi_config_t sta_cfg = {
         .sta = {
-            .ssid = CONFIG_REPEATER_UPSTREAM_SSID,
-            .password = CONFIG_REPEATER_UPSTREAM_PASSWORD,
             .scan_method = WIFI_ALL_CHANNEL_SCAN,
             .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
             .threshold.authmode = WIFI_AUTH_OPEN,
@@ -610,22 +614,24 @@ static void init_wifi(void)
 #endif
         },
     };
+    strlcpy((char *)sta_cfg.sta.ssid,     s_cfg.sta_ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy((char *)sta_cfg.sta.password,  s_cfg.sta_pass, sizeof(sta_cfg.sta.password));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
-    /* AP config */
+    /* AP config — from NVS runtime config */
     wifi_config_t ap_cfg = {
         .ap = {
-            .ssid = CONFIG_REPEATER_AP_SSID,
-            .ssid_len = strlen(CONFIG_REPEATER_AP_SSID),
-            .password = CONFIG_REPEATER_AP_PASSWORD,
             .channel = 0,
-            .max_connection = CONFIG_REPEATER_MAX_CLIENTS,
             .authmode = WIFI_AUTH_WPA2_WPA3_PSK,
             .pmf_cfg = { .required = false, .capable = true },
             .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
         },
     };
-    if (strlen(CONFIG_REPEATER_AP_PASSWORD) == 0) {
+    strlcpy((char *)ap_cfg.ap.ssid,     s_cfg.ap_ssid, sizeof(ap_cfg.ap.ssid));
+    strlcpy((char *)ap_cfg.ap.password, s_cfg.ap_pass, sizeof(ap_cfg.ap.password));
+    ap_cfg.ap.ssid_len       = strlen(s_cfg.ap_ssid);
+    ap_cfg.ap.max_connection = s_cfg.max_clients;
+    if (strlen(s_cfg.ap_pass) == 0) {
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
@@ -635,7 +641,7 @@ static void init_wifi(void)
      * Przepustowość HE HT20 MCS9 ≈ 143 Mbps — porównywalnie z HT40 11n. */
     esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     esp_wifi_set_bandwidth(WIFI_IF_AP,  WIFI_BW_HT20);
-    esp_wifi_set_max_tx_power(CONFIG_REPEATER_TX_POWER * 4);
+    esp_wifi_set_max_tx_power(s_cfg.tx_power_dbm * 4);
 
     /* Event handlers */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
@@ -669,13 +675,21 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    /* Load runtime config from NVS (falls back to menuconfig defaults) */
+    repeater_config_load(&s_cfg);
+
     print_wifi6_info();
     init_wifi();
 
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "APSTA started");
-    ESP_LOGI(TAG, "  Upstream: %s", CONFIG_REPEATER_UPSTREAM_SSID);
-    ESP_LOGI(TAG, "  Repeater: %s", CONFIG_REPEATER_AP_SSID);
+    ESP_LOGI(TAG, "  Upstream: %s", s_cfg.sta_ssid);
+    ESP_LOGI(TAG, "  Repeater: %s", s_cfg.ap_ssid);
+    ESP_LOGI(TAG, "  TX Power: %d dBm, Max clients: %d",
+             s_cfg.tx_power_dbm, s_cfg.max_clients);
+
+    /* Start HTTP config server (if enabled in menuconfig) */
+    repeater_httpd_start();
 
     xTaskCreate(status_task, "status", 4096, NULL, 5, NULL);
 
