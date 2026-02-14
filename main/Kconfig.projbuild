@@ -1,0 +1,49 @@
+menu "WiFi 6 Repeater Configuration"
+
+    menu "Upstream AP (STA) Settings"
+        config REPEATER_UPSTREAM_SSID
+            string "Upstream AP SSID"
+            default "MyUpstreamAP"
+            help
+                SSID sieci WiFi do której repeater się łączy (upstream AP).
+
+        config REPEATER_UPSTREAM_PASSWORD
+            string "Upstream AP Password"
+            default "password123"
+            help
+                Hasło do upstream AP.
+    endmenu
+
+    menu "Repeater AP Settings"
+        config REPEATER_AP_SSID
+            string "Repeater AP SSID"
+            default "MyRepeater"
+            help
+                SSID sieci WiFi tworzonej przez repeater.
+                Klienci łączą się z tym SSID.
+
+        config REPEATER_AP_PASSWORD
+            string "Repeater AP Password"
+            default "repeater123"
+            help
+                Hasło do AP repeatera. Minimum 8 znaków lub puste (open).
+
+        config REPEATER_MAX_CLIENTS
+            int "Max connected clients"
+            range 1 10
+            default 4
+            help
+                Maksymalna liczba klientów podłączonych do AP repeatera.
+    endmenu
+
+    menu "Radio Settings"
+        config REPEATER_TX_POWER
+            int "TX Power (dBm)"
+            range 2 20
+            default 20
+            help
+                Moc nadawania WiFi w dBm.
+                20 dBm = maksymalna moc, 8 dBm = niska moc.
+    endmenu
+
+endmenu
