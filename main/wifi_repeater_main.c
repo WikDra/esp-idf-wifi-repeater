@@ -325,6 +325,29 @@ static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len)
         uint32_t src_ip;
         memcpy(&src_ip, frame + 26, 4);
         macnat_learn(src_ip, eth_src);
+
+        /* DHCP fix: klient wysyła Discover/Request z chaddr = swój MAC.
+         * Router odpowiada unicast do chaddr → WiFi HW na STA odrzuca
+         * (STA MAC = sklonowany ≠ chaddr). Fix: ustaw BROADCAST flag
+         * w DHCP, żeby router odpowiedział broadcastem. */
+        const uint8_t *ip_hdr = frame + 14;
+        if (ip_hdr[9] == 17) {  /* UDP */
+            uint8_t ihl = (ip_hdr[0] & 0x0F) * 4;
+            const uint8_t *udp = ip_hdr + ihl;
+            if (14 + ihl + 8 <= len &&
+                udp[0] == 0 && udp[1] == 68 &&   /* src port 68 (DHCP client) */
+                udp[2] == 0 && udp[3] == 67) {    /* dst port 67 (DHCP server) */
+                uint8_t *dhcp = (uint8_t *)(udp + 8);
+                int dhcp_off = 14 + ihl + 8;
+                if (dhcp_off + 44 <= len) {
+                    /* Set BROADCAST flag (bit 15 of flags field at DHCP offset 10)
+                     * Forces server to respond via broadcast instead of unicast to chaddr */
+                    dhcp[10] |= 0x80;
+                    ESP_LOGD(TAG, "MAC-NAT: set BROADCAST flag in DHCP from " MACSTR,
+                             MAC2STR(eth_src));
+                }
+            }
+        }
     } else if (ethertype == 0x0806 && len >= 42) {
         /* ARP: sender IP at 28, sender MAC at 22 */
         uint32_t sender_ip;
