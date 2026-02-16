@@ -343,6 +343,11 @@ static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len)
                     /* Set BROADCAST flag (bit 15 of flags field at DHCP offset 10)
                      * Forces server to respond via broadcast instead of unicast to chaddr */
                     dhcp[10] |= 0x80;
+                    /* Zero UDP checksum — modifying payload invalidates it.
+                     * UDP/IPv4 allows checksum=0 meaning "not computed" (RFC 768). */
+                    uint8_t *udp_csum = (uint8_t *)(udp + 6);
+                    udp_csum[0] = 0;
+                    udp_csum[1] = 0;
                     ESP_LOGD(TAG, "MAC-NAT: set BROADCAST flag in DHCP from " MACSTR,
                              MAC2STR(eth_src));
                 }
