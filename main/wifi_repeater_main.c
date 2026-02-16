@@ -1,5 +1,7 @@
 /*
- * ESP32-C6 WiFi 6 Repeater (bez NAT, ta sama podsieć)
+ * ESP32 WiFi Repeater (bez NAT, ta sama podsieć)
+ *
+ * Obsługiwane SoC: ESP32-C6 (WiFi 6), ESP32-S3 (WiFi 5)
  *
  * Architektura:
  *   ESP32-C6 działa w trybie APSTA (jednoczesne STA + SoftAP).
@@ -866,23 +868,25 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  WiFi 6 info + status
+ *  WiFi info + status
  * ══════════════════════════════════════════════════════════════ */
 
-static void print_wifi6_info(void)
+static void print_wifi_info(void)
 {
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "=== WiFi 6 (802.11ax) Repeater ===");
 #if SOC_WIFI_HE_SUPPORT
+    ESP_LOGI(TAG, "=== WiFi 6 (802.11ax) Repeater ===");
     ESP_LOGI(TAG, "  HE (High Efficiency): CAPABLE");
     ESP_LOGI(TAG, "  OFDMA / BSS Coloring: CAPABLE");
     ESP_LOGI(TAG, "  MCS 0-9:              YES");
-    ESP_LOGI(TAG, "  (WiFi6 only if upstream AP supports it)");
+    ESP_LOGI(TAG, "  BW: HT20 (required for HE)");
+    ESP_LOGI(TAG, "  (WiFi6 active only if upstream AP supports it)");
 #else
-    ESP_LOGW(TAG, "  HE not available on this SoC");
+    ESP_LOGI(TAG, "=== WiFi 5 (802.11n) Repeater ===");
+    ESP_LOGI(TAG, "  BW: HT40 (2.4 GHz)");
 #endif
     ESP_LOGI(TAG, "  Compat: WiFi 4/5");
-    ESP_LOGI(TAG, "  BW: HT20 (for HE), Security: WPA2/WPA3");
+    ESP_LOGI(TAG, "  Security: WPA2/WPA3");
     ESP_LOGI(TAG, "===================================");
 }
 
@@ -908,6 +912,9 @@ static void status_task(void *pv)
 #if SOC_WIFI_HE_SUPPORT
             ESP_LOGI(TAG, "  PHY: %s",
                      ap.phy_11ax ? "WiFi6(11ax)" :
+                     ap.phy_11n  ? "WiFi4(11n)"  : "Legacy");
+#else
+            ESP_LOGI(TAG, "  PHY: %s",
                      ap.phy_11n  ? "WiFi4(11n)"  : "Legacy");
 #endif
         } else {
@@ -999,11 +1006,14 @@ static void init_wifi(void)
     }
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
-    /* HT20 na 2.4 GHz — HT40 wymusza fallback do 11n (WiFi 4).
-     * WiFi 6 (11ax) na C6 działa tylko z HT20.
-     * Przepustowość HE HT20 MCS9 ≈ 143 Mbps — porównywalnie z HT40 11n. */
+    /* Bandwidth: HE (C6) wymaga HT20; bez HE (S3) HT40 daje lepszy throughput */
+#if SOC_WIFI_HE_SUPPORT
     esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     esp_wifi_set_bandwidth(WIFI_IF_AP,  WIFI_BW_HT20);
+#else
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40);
+    esp_wifi_set_bandwidth(WIFI_IF_AP,  WIFI_BW_HT40);
+#endif
     esp_wifi_set_max_tx_power(s_cfg.tx_power_dbm * 4);
 
     /* Event handlers */
@@ -1021,8 +1031,12 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "  ESP32-C6 WiFi 6 Repeater (no NAT)");
-    ESP_LOGI(TAG, "  L2 Bridge - MAC Cloning");
+#if SOC_WIFI_HE_SUPPORT
+    ESP_LOGI(TAG, "  ESP32 WiFi 6 Repeater (no NAT)");
+#else
+    ESP_LOGI(TAG, "  ESP32 WiFi Repeater (no NAT)");
+#endif
+    ESP_LOGI(TAG, "  L2 Bridge - MAC Cloning + MAC-NAT");
     ESP_LOGI(TAG, "========================================");
 
     s_wifi_event_group = xEventGroupCreate();
@@ -1041,7 +1055,7 @@ void app_main(void)
     /* Load runtime config from NVS (falls back to menuconfig defaults) */
     repeater_config_load(&s_cfg);
 
-    print_wifi6_info();
+    print_wifi_info();
     init_wifi();
 
     ESP_ERROR_CHECK(esp_wifi_start());

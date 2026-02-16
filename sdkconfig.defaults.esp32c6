@@ -1,0 +1,2 @@
+# ESP32-C6 specific: WiFi 6 (HE), single-core RISC-V, max 160 MHz
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160

@@ -1,4 +1,4 @@
-menu "WiFi 6 Repeater Configuration"
+menu "WiFi Repeater Configuration"
 
     menu "Upstream AP (STA) Settings"
         config REPEATER_UPSTREAM_SSID
