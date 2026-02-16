@@ -84,6 +84,8 @@ static volatile bool s_suppress_auto_reconnect = false;  /* blokuj auto-reconnec
 
 esp_netif_t *s_sta_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
+static int s_client_count = 0;           /* ile klientów podłączonych do AP */
+static bool s_ap_ip_from_sniff = false;  /* AP IP ustawione z DHCP sniffera */
 
 /* Runtime config loaded from NVS (or menuconfig defaults) */
 static repeater_config_t s_cfg;
@@ -122,11 +124,21 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
 
     uint8_t *dst = (uint8_t *)buffer;
 
-    /* Sniff DHCP ACK (router → client) — learn subnet for AP IP */
-    sniff_dhcp_ack_and_set_ap_ip((const uint8_t *)buffer, len);
+    /* Sniff DHCP ACK — only if UDP port 67→68 (skip 99.9% packets with inline check) */
+    if (len >= 286 && dst[12] == 0x08 && dst[13] == 0x00) {
+        const uint8_t *ip_hdr = dst + 14;
+        if (ip_hdr[9] == 17) {  /* UDP */
+            uint8_t ihl = (ip_hdr[0] & 0x0F) * 4;
+            const uint8_t *udp = ip_hdr + ihl;
+            if (14 + ihl + 8 <= len && udp[0] == 0 && udp[1] == 67 && udp[2] == 0 && udp[3] == 68) {
+                sniff_dhcp_ack_and_set_ap_ip(dst, len);
+            }
+        }
+    }
 
-    /* MAC-NAT: przepisz dst MAC dla dodatkowych klientów */
-    if (s_mac_cloned && !(dst[0] & 0x01)) {
+    /* MAC-NAT downstream: przepisz dst MAC dla dodatkowych klientów
+     * Skip jeśli jest tylko 1 klient (primary) — nic do przepisywania */
+    if (s_client_count > 1 && !(dst[0] & 0x01)) {
         macnat_rewrite_downstream((uint8_t *)buffer, len);
     }
 
@@ -163,8 +175,9 @@ static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
     uint8_t *dst = (uint8_t *)buffer;
     uint8_t *src = (uint8_t *)buffer + 6;
 
-    /* MAC-NAT: przepisz src MAC dla non-primary klientów */
-    if (s_mac_cloned && !(src[0] & 0x01) &&
+    /* MAC-NAT upstream: przepisz src MAC non-primary klientów
+     * Skip jeśli jest tylko 1 klient */
+    if (s_client_count > 1 && !(src[0] & 0x01) &&
         memcmp(src, s_client_mac, 6) != 0) {
         macnat_rewrite_upstream((uint8_t *)buffer, len);
     }
@@ -248,22 +261,23 @@ static void macnat_learn(uint32_t ip_n, const uint8_t *mac)
     /* Ignoruj broadcast/multicast MAC i zerowy IP */
     if ((mac[0] & 0x01) || ip_n == 0) return;
 
-    int64_t now = esp_timer_get_time();
     int free_idx = -1;
     int oldest_idx = 0;
 
     for (int i = 0; i < MACNAT_MAX; i++) {
         if (s_macnat[i].used) {
-            /* Istniejący wpis — aktualizuj */
+            /* Hot path: istniejący wpis, ten sam IP+MAC — nic nie rób */
             if (s_macnat[i].ip == ip_n) {
+                if (memcmp(s_macnat[i].real_mac, mac, 6) == 0) return;
+                /* IP istnieje ale MAC się zmienił */
                 memcpy(s_macnat[i].real_mac, mac, 6);
-                s_macnat[i].last_seen = now;
+                s_macnat[i].last_seen = esp_timer_get_time();
                 return;
             }
             if (memcmp(s_macnat[i].real_mac, mac, 6) == 0) {
                 /* Ten sam MAC, nowe IP (DHCP renewal) */
                 s_macnat[i].ip = ip_n;
-                s_macnat[i].last_seen = now;
+                s_macnat[i].last_seen = esp_timer_get_time();
                 return;
             }
             if (s_macnat[i].last_seen < s_macnat[oldest_idx].last_seen) {
@@ -278,7 +292,7 @@ static void macnat_learn(uint32_t ip_n, const uint8_t *mac)
     int idx = (free_idx >= 0) ? free_idx : oldest_idx;
     s_macnat[idx].ip = ip_n;
     memcpy(s_macnat[idx].real_mac, mac, 6);
-    s_macnat[idx].last_seen = now;
+    s_macnat[idx].last_seen = esp_timer_get_time();
     s_macnat[idx].used = true;
     ESP_LOGI(TAG, "MAC-NAT learned: " IPSTR " -> " MACSTR,
              IP2STR((esp_ip4_addr_t *)&ip_n), MAC2STR(mac));
@@ -511,6 +525,7 @@ static void mac_change_task(void *pvParams)
 
         /* 5a. Wyczyść tablicę MAC-NAT (nowa sesja bridgingu = nowe mapowania) */
         macnat_clear();
+        s_ap_ip_from_sniff = false;
 
         /* 5b. Przywróć AP do 192.168.4.1 z DHCP (fallback dostępu do GUI).
          *     Po uzyskaniu IP_EVENT_STA_GOT_IP, AP przełączy się
@@ -626,8 +641,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     case WIFI_EVENT_AP_STACONNECTED: {
         wifi_event_ap_staconnected_t *ev = (wifi_event_ap_staconnected_t *)data;
-        ESP_LOGI(TAG, "-> Client joined: " MACSTR " (AID=%d)",
-                 MAC2STR(ev->mac), ev->aid);
+        s_client_count++;
+        ESP_LOGI(TAG, "-> Client joined: " MACSTR " (AID=%d, total=%d)",
+                 MAC2STR(ev->mac), ev->aid, s_client_count);
 
         /* Jeśli jesteśmy w trybie IDLE (brak klona) → klonuj MAC klienta */
         if (s_state == STATE_IDLE && !s_mac_cloned) {
@@ -646,8 +662,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     case WIFI_EVENT_AP_STADISCONNECTED: {
         wifi_event_ap_stadisconnected_t *ev = (wifi_event_ap_stadisconnected_t *)data;
-        ESP_LOGI(TAG, "<- Client left: " MACSTR " (AID=%d)",
-                 MAC2STR(ev->mac), ev->aid);
+        if (s_client_count > 0) s_client_count--;
+        ESP_LOGI(TAG, "<- Client left: " MACSTR " (AID=%d, total=%d)",
+                 MAC2STR(ev->mac), ev->aid, s_client_count);
 
         /* Jeśli odszedł ten klient, dla którego klonowaliśmy MAC → przywróć */
         if (s_mac_cloned && memcmp(ev->mac, s_client_mac, 6) == 0) {
@@ -697,23 +714,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
  * ══════════════════════════════════════════════════════════════ */
 static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
 {
-    /* Minimum: ETH(14) + IP(20) + UDP(8) + DHCP(240+4 cookie) = 286 */
-    if (len < 286) return;
-
-    /* EtherType = IPv4 (0x0800) */
-    if (data[12] != 0x08 || data[13] != 0x00) return;
+    /* Caller already verified: IPv4, UDP, src:67 dst:68, len >= 286 */
 
     /* IP header */
     const uint8_t *ip_hdr = data + 14;
     uint8_t ip_ihl = (ip_hdr[0] & 0x0F) * 4;
-    if (ip_hdr[9] != 17) return;  /* not UDP */
-    if (14 + ip_ihl + 8 > len) return;
-
-    /* UDP: src=67 (DHCP server) dst=68 (DHCP client) */
     const uint8_t *udp_hdr = ip_hdr + ip_ihl;
-    uint16_t src_port = (udp_hdr[0] << 8) | udp_hdr[1];
-    uint16_t dst_port = (udp_hdr[2] << 8) | udp_hdr[3];
-    if (src_port != 67 || dst_port != 68) return;
 
     /* DHCP message */
     const uint8_t *dhcp = udp_hdr + 8;
@@ -766,6 +772,9 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
         macnat_learn(client_ip_n, &dhcp[28]);
     }
 
+    /* AP IP already set from previous DHCP ACK — skip expensive recalculation */
+    if (s_ap_ip_from_sniff) return;
+
     ESP_LOGI(TAG, "DHCP ACK sniffed: client=" IPSTR " mask=" IPSTR " gw=" IPSTR,
              IP2STR((esp_ip4_addr_t *)&client_ip_n),
              IP2STR((esp_ip4_addr_t *)&subnet_mask),
@@ -801,6 +810,7 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
 
     esp_netif_dhcps_stop(s_ap_netif);
     esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+    s_ap_ip_from_sniff = true;
 
     ESP_LOGI(TAG, "AP IP set to " IPSTR " (reachable from bridged client on same subnet)",
              IP2STR(&ap_ip.ip));
