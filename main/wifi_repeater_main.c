@@ -93,6 +93,9 @@ static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom 
 static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip);
 static void ap_restore_management_ip(void);
 static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len);
+static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len);
+static void macnat_rewrite_downstream(uint8_t *frame, uint16_t len);
+static void macnat_learn(uint32_t ip_n, const uint8_t *mac);
 
 /* ══════════════════════════════════════════════════════════════
  *  L2 Packet Forwarding
@@ -119,6 +122,11 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
 
     /* Sniff DHCP ACK (router → client) — learn subnet for AP IP */
     sniff_dhcp_ack_and_set_ap_ip((const uint8_t *)buffer, len);
+
+    /* MAC-NAT: przepisz dst MAC dla dodatkowych klientów */
+    if (s_mac_cloned && !(dst[0] & 0x01)) {
+        macnat_rewrite_downstream((uint8_t *)buffer, len);
+    }
 
     /* Forward WSZYSTKO do klienta na AP */
     esp_wifi_internal_tx(WIFI_IF_AP, buffer, len);
@@ -151,6 +159,13 @@ static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
     }
 
     uint8_t *dst = (uint8_t *)buffer;
+    uint8_t *src = (uint8_t *)buffer + 6;
+
+    /* MAC-NAT: przepisz src MAC dla non-primary klientów */
+    if (s_mac_cloned && !(src[0] & 0x01) &&
+        memcmp(src, s_client_mac, 6) != 0) {
+        macnat_rewrite_upstream((uint8_t *)buffer, len);
+    }
 
     /* Broadcast/multicast — forward upstream + podaj do stosu AP */
     if (dst[0] & 0x01) {
@@ -197,6 +212,143 @@ static void forwarding_stop(void)
     s_forwarding_active = false;
     /* Przywróć modem sleep w trybie idle */
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  MAC-NAT: Multi-client support
+ *
+ *  STA ma MAC sklonowany pod jednego klienta (primary). Dodatkowi
+ *  klienci nie byliby widziani przez router (802.11 TA != ich MAC).
+ *
+ *  Rozwiązanie:
+ *   Upstream (AP→STA): przepisz src MAC dodatkowych klientów na
+ *                      sklonowany MAC. Router widzi jeden MAC.
+ *   Downstream (STA→AP): sprawdź dst IP w tablicy IP→MAC,
+ *                         przepisz dst MAC na prawdziwy MAC klienta.
+ *
+ *  Tablica IP→MAC uczona z pakietów klientów (IPv4 src, ARP sender)
+ *  i z DHCP ACK (yiaddr→chaddr).
+ * ══════════════════════════════════════════════════════════════ */
+
+#define MACNAT_MAX 8
+
+typedef struct {
+    uint32_t ip;          /* network byte order */
+    uint8_t  real_mac[6]; /* prawdziwy MAC klienta */
+    int64_t  last_seen;   /* esp_timer_get_time() timestamp */
+    bool     used;
+} macnat_entry_t;
+
+static macnat_entry_t s_macnat[MACNAT_MAX];
+
+static void macnat_learn(uint32_t ip_n, const uint8_t *mac)
+{
+    /* Ignoruj broadcast/multicast MAC i zerowy IP */
+    if ((mac[0] & 0x01) || ip_n == 0) return;
+
+    int64_t now = esp_timer_get_time();
+    int free_idx = -1;
+    int oldest_idx = 0;
+
+    for (int i = 0; i < MACNAT_MAX; i++) {
+        if (s_macnat[i].used) {
+            /* Istniejący wpis — aktualizuj */
+            if (s_macnat[i].ip == ip_n) {
+                memcpy(s_macnat[i].real_mac, mac, 6);
+                s_macnat[i].last_seen = now;
+                return;
+            }
+            if (memcmp(s_macnat[i].real_mac, mac, 6) == 0) {
+                /* Ten sam MAC, nowe IP (DHCP renewal) */
+                s_macnat[i].ip = ip_n;
+                s_macnat[i].last_seen = now;
+                return;
+            }
+            if (s_macnat[i].last_seen < s_macnat[oldest_idx].last_seen) {
+                oldest_idx = i;
+            }
+        } else if (free_idx == -1) {
+            free_idx = i;
+        }
+    }
+
+    /* Nowy wpis */
+    int idx = (free_idx >= 0) ? free_idx : oldest_idx;
+    s_macnat[idx].ip = ip_n;
+    memcpy(s_macnat[idx].real_mac, mac, 6);
+    s_macnat[idx].last_seen = now;
+    s_macnat[idx].used = true;
+    ESP_LOGI(TAG, "MAC-NAT learned: " IPSTR " -> " MACSTR,
+             IP2STR((esp_ip4_addr_t *)&ip_n), MAC2STR(mac));
+}
+
+static const uint8_t *macnat_lookup_by_ip(uint32_t ip_n)
+{
+    for (int i = 0; i < MACNAT_MAX; i++) {
+        if (s_macnat[i].used && s_macnat[i].ip == ip_n) {
+            return s_macnat[i].real_mac;
+        }
+    }
+    return NULL;
+}
+
+static void macnat_clear(void)
+{
+    memset(s_macnat, 0, sizeof(s_macnat));
+}
+
+/* Upstream: przepisz src MAC dodatkowego klienta na sklonowany MAC.
+ * Router widzi jeden MAC, a my zapamiętujemy IP→MAC do powrotu. */
+static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len)
+{
+    uint8_t *eth_src = frame + 6;
+    uint16_t ethertype = (frame[12] << 8) | frame[13];
+
+    if (ethertype == 0x0800 && len >= 34) {
+        /* IPv4: src IP at offset 26 */
+        uint32_t src_ip;
+        memcpy(&src_ip, frame + 26, 4);
+        macnat_learn(src_ip, eth_src);
+    } else if (ethertype == 0x0806 && len >= 42) {
+        /* ARP: sender IP at 28, sender MAC at 22 */
+        uint32_t sender_ip;
+        memcpy(&sender_ip, frame + 28, 4);
+        macnat_learn(sender_ip, eth_src);
+        /* Przepisz ARP sender hardware address */
+        memcpy(frame + 22, s_client_mac, 6);
+    }
+
+    /* Przepisz Ethernet source MAC */
+    memcpy(eth_src, s_client_mac, 6);
+}
+
+/* Downstream: przepisz dst MAC ze sklonowanego na prawdziwy MAC klienta.
+ * Router wysyła do sklonowanego MAC — my podmieniamy na docelowy. */
+static void macnat_rewrite_downstream(uint8_t *frame, uint16_t len)
+{
+    uint16_t ethertype = (frame[12] << 8) | frame[13];
+    const uint8_t *real_mac = NULL;
+
+    if (ethertype == 0x0800 && len >= 34) {
+        /* IPv4: dst IP at offset 30 */
+        uint32_t dst_ip;
+        memcpy(&dst_ip, frame + 30, 4);
+        real_mac = macnat_lookup_by_ip(dst_ip);
+    } else if (ethertype == 0x0806 && len >= 42) {
+        /* ARP: target IP at 38, target MAC at 32 */
+        uint32_t target_ip;
+        memcpy(&target_ip, frame + 38, 4);
+        real_mac = macnat_lookup_by_ip(target_ip);
+        if (real_mac && memcmp(real_mac, s_client_mac, 6) != 0) {
+            /* Przepisz ARP target hardware address */
+            memcpy(frame + 32, real_mac, 6);
+        }
+    }
+
+    /* Przepisz Ethernet dst MAC tylko dla dodatkowych klientów */
+    if (real_mac && memcmp(real_mac, s_client_mac, 6) != 0) {
+        memcpy(frame, real_mac, 6);
+    }
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -355,6 +507,9 @@ static void mac_change_task(void *pvParams)
         esp_netif_dhcpc_start(s_sta_netif);
         ESP_LOGI(TAG, "  DHCP client re-enabled");
 
+        /* 5a. Wyczyść tablicę MAC-NAT (nowa sesja bridgingu = nowe mapowania) */
+        macnat_clear();
+
         /* 5b. Przywróć AP do 192.168.4.1 z DHCP (fallback dostępu do GUI).
          *     Po uzyskaniu IP_EVENT_STA_GOT_IP, AP przełączy się
          *     automatycznie na podsieć upstream. */
@@ -477,12 +632,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             memcpy(s_client_mac, ev->mac, 6);
             request_mac_clone(ev->mac);
         } else if (s_mac_cloned) {
-            /* Już mamy klienta i bridge aktywny.
-             * Drugi klient nie będzie w pełni obsługiwany
-             * (single-client MAC clone limitation). */
-            ESP_LOGW(TAG, "Bridge already active for " MACSTR
-                     ". Additional client may not get upstream access.",
-                     MAC2STR(s_client_mac));
+            /* Bridge aktywny — dodatkowy klient obsługiwany przez MAC-NAT.
+             * Jego src MAC jest przepisywany na sklonowany MAC upstream,
+             * a odpowiedzi kierowane na podstawie tablicy IP→MAC. */
+            ESP_LOGI(TAG, "MAC-NAT: additional client " MACSTR
+                     " will use NAT through " MACSTR,
+                     MAC2STR(ev->mac), MAC2STR(s_client_mac));
         }
         break;
     }
@@ -603,6 +758,11 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
     uint32_t client_ip_n;   /* network byte order */
     memcpy(&client_ip_n, &dhcp[16], 4);
     if (client_ip_n == 0 || subnet_mask == 0) return;
+
+    /* Learn IP→MAC from DHCP chaddr (offset 28 in DHCP payload) */
+    if (dhcp_len >= 34) {
+        macnat_learn(client_ip_n, &dhcp[28]);
+    }
 
     ESP_LOGI(TAG, "DHCP ACK sniffed: client=" IPSTR " mask=" IPSTR " gw=" IPSTR,
              IP2STR((esp_ip4_addr_t *)&client_ip_n),
