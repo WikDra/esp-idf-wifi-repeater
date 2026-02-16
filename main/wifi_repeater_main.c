@@ -100,6 +100,7 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len);
 static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len);
 static void macnat_rewrite_downstream(uint8_t *frame, uint16_t len);
 static void macnat_learn(uint32_t ip_n, const uint8_t *mac);
+static void request_mac_clone(const uint8_t *client_mac);
 
 /* ══════════════════════════════════════════════════════════════
  *  L2 Packet Forwarding
@@ -581,6 +582,25 @@ static void mac_change_task(void *pvParams)
             ESP_LOGW(TAG, "  Reconnect timeout, will retry automatically");
         }
         s_state = STATE_IDLE;
+
+        /* Check if client(s) connected during restore — they missed
+         * the IDLE check in event handler, so trigger clone now */
+        {
+            wifi_sta_list_t pending;
+            if (esp_wifi_ap_get_sta_list(&pending) == ESP_OK && pending.num > 0) {
+                ESP_LOGI(TAG, "Client(s) already connected during restore, "
+                         "auto-cloning for " MACSTR, MAC2STR(pending.sta[0].mac));
+                memcpy(s_client_mac, pending.sta[0].mac, 6);
+                s_client_count = pending.num;
+                /* Release mutex BEFORE requesting clone (new task needs it) */
+                xSemaphoreGive(s_mac_task_mutex);
+                s_mac_task_handle = NULL;
+                free(params);
+                request_mac_clone(s_client_mac);
+                vTaskDelete(NULL);
+                return;  /* unreachable, but clear intent */
+            }
+        }
     }
 
     xSemaphoreGive(s_mac_task_mutex);
@@ -669,7 +689,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     case WIFI_EVENT_AP_STACONNECTED: {
         wifi_event_ap_staconnected_t *ev = (wifi_event_ap_staconnected_t *)data;
-        s_client_count++;
+        /* Use actual sta_list for reliable count (manual tracking desyncs
+         * from duplicate leave events caused by SA Query timeouts) */
+        {
+            wifi_sta_list_t sl;
+            s_client_count = (esp_wifi_ap_get_sta_list(&sl) == ESP_OK) ? sl.num : s_client_count + 1;
+        }
         ESP_LOGI(TAG, "-> Client joined: " MACSTR " (AID=%d, total=%d)",
                  MAC2STR(ev->mac), ev->aid, s_client_count);
 
@@ -690,7 +715,19 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
     case WIFI_EVENT_AP_STADISCONNECTED: {
         wifi_event_ap_stadisconnected_t *ev = (wifi_event_ap_stadisconnected_t *)data;
-        if (s_client_count > 0) s_client_count--;
+        /* Use actual sta_list for reliable count (exclude leaving client) */
+        {
+            wifi_sta_list_t sl;
+            if (esp_wifi_ap_get_sta_list(&sl) == ESP_OK) {
+                int cnt = 0;
+                for (int i = 0; i < sl.num; i++) {
+                    if (memcmp(sl.sta[i].mac, ev->mac, 6) != 0) cnt++;
+                }
+                s_client_count = cnt;
+            } else if (s_client_count > 0) {
+                s_client_count--;
+            }
+        }
         ESP_LOGI(TAG, "<- Client left: " MACSTR " (AID=%d, total=%d)",
                  MAC2STR(ev->mac), ev->aid, s_client_count);
 
