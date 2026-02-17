@@ -2,6 +2,8 @@
 
 Repeater WiFi oparty na **ESP32-C6** (WiFi 6 / 802.11ax) lub **ESP32-S3** (WiFi 5 / 802.11n), z **wieloklientowym MAC-NAT**, **web GUI** do konfiguracji w locie i przezroczystym L2 bridgingiem.
 
+> **Testowane na ESP-IDF v5.5.1**
+
 ## Jak działa
 
 ```
@@ -139,7 +141,7 @@ Repeater obsługuje **do 4 klientów jednocześnie** mimo ograniczenia jednego M
 ## Ograniczenia
 
 - ESP32 ma **jedno radio** — STA i AP muszą pracować na tym samym kanale (automatycznie dopasowywany)
-- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **10-15 Mbps**
+- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20)
 - STA MAC sklonowany pod jednego klienta (primary) — dodatkowi klienci obsługiwani przez MAC-NAT
 - Maksymalnie **8 wpisów** w tablicy MAC-NAT (LRU eviction)
 - `esp_wifi_internal_reg_rxcb` to wewnętrzne API ESP-IDF — może się zmienić w przyszłych wersjach
