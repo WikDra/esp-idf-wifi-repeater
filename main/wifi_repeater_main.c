@@ -98,6 +98,8 @@ static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip);
 static void ap_restore_management_ip(void);
 static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len);
 static void macnat_rewrite_upstream(uint8_t *frame, uint16_t len);
+static void ap_clone_upstream_ssid(const uint8_t *ssid, uint8_t ssid_len);
+static void roaming_task(void *pv);
 static void macnat_rewrite_downstream(uint8_t *frame, uint16_t len);
 static void macnat_learn(uint32_t ip_n, const uint8_t *mac);
 static void request_mac_clone(const uint8_t *client_mac);
@@ -662,6 +664,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
                      MAC2STR(s_upstream_bssid), s_upstream_channel);
         }
 
+        /* Klonuj SSID upstream do AP (jeśli włączone) */
+        ap_clone_upstream_ssid(ev->ssid, ev->ssid_len);
+
         /* Jeśli jesteśmy w trybie bridging (MAC cloned), włącz forwarding */
         if (s_mac_cloned) {
             forwarding_start();
@@ -1016,6 +1021,181 @@ static void status_task(void *pv)
 }
 
 /* ══════════════════════════════════════════════════════════════
+ *  AP SSID Cloning — kopiuje SSID upstream AP na Repeater AP
+ * ══════════════════════════════════════════════════════════════ */
+
+static void ap_clone_upstream_ssid(const uint8_t *ssid, uint8_t ssid_len)
+{
+    if (!s_cfg.ap_clone_ssid) return;
+
+    wifi_config_t ap_cfg;
+    esp_wifi_get_config(WIFI_IF_AP, &ap_cfg);
+
+    /* Sprawdź czy SSID się zmieniło */
+    if (ap_cfg.ap.ssid_len == ssid_len &&
+        memcmp(ap_cfg.ap.ssid, ssid, ssid_len) == 0) {
+        return;  /* already cloned */
+    }
+
+    memset(ap_cfg.ap.ssid, 0, sizeof(ap_cfg.ap.ssid));
+    memcpy(ap_cfg.ap.ssid, ssid, ssid_len);
+    ap_cfg.ap.ssid_len = ssid_len;
+    esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+
+    ESP_LOGW(TAG, "AP SSID cloned to: %.*s", ssid_len, ssid);
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  Pseudo-mesh roaming — scan for better AP with same SSID
+ *
+ *  Monitoruje RSSI upstream AP. Jeśli spadnie poniżej progu,
+ *  skanuje w poszukiwaniu innego AP z tym samym SSID ale
+ *  innym BSSID (pomijając własny AP). Przełącza się na najlepszy.
+ * ══════════════════════════════════════════════════════════════ */
+
+static void roaming_task(void *pv)
+{
+    ESP_LOGI(TAG, "Pseudo-mesh roaming started (threshold=%d dBm, hysteresis=%d dB)",
+             (int)s_cfg.roam_rssi_threshold, (int)s_cfg.roam_hysteresis);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));  /* sprawdzaj co 10s */
+
+        /* Roaming tylko gdy STA jest podłączony i nie trwa zmiana MAC */
+        if (!s_sta_connected || s_state == STATE_MAC_CHANGING ||
+            s_state == STATE_MAC_RESTORING || s_suppress_auto_reconnect) {
+            continue;
+        }
+
+        wifi_ap_record_t current_ap;
+        if (esp_wifi_sta_get_ap_info(&current_ap) != ESP_OK) {
+            continue;
+        }
+
+        /* RSSI powyżej progu — nie szukaj lepszego */
+        if (current_ap.rssi >= s_cfg.roam_rssi_threshold) {
+            continue;
+        }
+
+        ESP_LOGW(TAG, "ROAM: RSSI=%d < threshold=%d, scanning for better AP...",
+                 current_ap.rssi, (int)s_cfg.roam_rssi_threshold);
+
+        /* Scan pasywny (nie rozłącza STA) */
+        wifi_scan_config_t scan_cfg = {
+            .ssid = current_ap.ssid,   /* szukaj tego samego SSID */
+            .show_hidden = false,
+            .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+            .scan_time.active.min = 100,
+            .scan_time.active.max = 300,
+        };
+
+        /* esp_wifi_scan_start z block=true może trwać kilka sekund */
+        esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "ROAM: scan failed: %s", esp_err_to_name(err));
+            continue;
+        }
+
+        uint16_t ap_count = 0;
+        esp_wifi_scan_get_ap_num(&ap_count);
+        if (ap_count == 0) {
+            esp_wifi_scan_get_ap_records(&ap_count, NULL);  /* free scan memory */
+            ESP_LOGI(TAG, "ROAM: no APs found with SSID '%s'", current_ap.ssid);
+            continue;
+        }
+
+        wifi_ap_record_t *ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
+        if (!ap_list) {
+            esp_wifi_scan_get_ap_records(&ap_count, NULL);
+            continue;
+        }
+        esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+
+        /* Znajdź najlepszy AP (pomijając siebie i obecny) */
+        int best_idx = -1;
+        int best_rssi = -127;
+
+        for (int i = 0; i < ap_count; i++) {
+            /* Pomiń własny AP (BSSID = s_ap_mac) */
+            if (memcmp(ap_list[i].bssid, s_ap_mac, 6) == 0) {
+                ESP_LOGI(TAG, "ROAM: skip self " MACSTR, MAC2STR(ap_list[i].bssid));
+                continue;
+            }
+            /* Pomiń obecny AP */
+            if (memcmp(ap_list[i].bssid, s_upstream_bssid, 6) == 0) {
+                continue;
+            }
+            /* Pomiń AP z gorszym sygnałem */
+            if (ap_list[i].rssi > best_rssi) {
+                best_rssi = ap_list[i].rssi;
+                best_idx = i;
+            }
+        }
+
+        if (best_idx < 0) {
+            ESP_LOGI(TAG, "ROAM: no better AP found");
+            free(ap_list);
+            continue;
+        }
+
+        /* Nowy AP musi być lepszy o hysteresis od obecnego */
+        if (best_rssi < current_ap.rssi + s_cfg.roam_hysteresis) {
+            ESP_LOGI(TAG, "ROAM: best candidate " MACSTR " RSSI=%d, "
+                     "not enough improvement (need +%d dB over %d)",
+                     MAC2STR(ap_list[best_idx].bssid), best_rssi,
+                     (int)s_cfg.roam_hysteresis, current_ap.rssi);
+            free(ap_list);
+            continue;
+        }
+
+        /* ── Roam! ──────────────────────────── */
+        ESP_LOGW(TAG, "ROAM: switching to " MACSTR " RSSI=%d (from " MACSTR " RSSI=%d)",
+                 MAC2STR(ap_list[best_idx].bssid), best_rssi,
+                 MAC2STR(s_upstream_bssid), current_ap.rssi);
+
+        /* Zaktualizuj BSSID i kanał */
+        memcpy(s_upstream_bssid, ap_list[best_idx].bssid, 6);
+        s_upstream_channel = ap_list[best_idx].primary;
+
+        /* Ustaw STA config z nowym BSSID */
+        wifi_config_t sta_cfg;
+        esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+        memcpy(sta_cfg.sta.bssid, s_upstream_bssid, 6);
+        sta_cfg.sta.bssid_set = true;
+        sta_cfg.sta.channel = s_upstream_channel;
+        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+
+        free(ap_list);
+
+        /* Rozłącz i połącz z nowym AP */
+        s_suppress_auto_reconnect = true;
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        s_suppress_auto_reconnect = false;
+        esp_wifi_connect();
+
+        /* Czekaj na połączenie */
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, STA_CONNECTED_BIT,
+                                                pdFALSE, pdFALSE, pdMS_TO_TICKS(10000));
+        if (bits & STA_CONNECTED_BIT) {
+            ESP_LOGW(TAG, "ROAM: successfully roamed to " MACSTR, MAC2STR(s_upstream_bssid));
+        } else {
+            ESP_LOGE(TAG, "ROAM: failed to connect, unlocking BSSID for auto-reconnect");
+            /* Odblokuj BSSID */
+            esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+            sta_cfg.sta.bssid_set = false;
+            sta_cfg.sta.channel = 0;
+            esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+            s_bssid_locked = false;
+            esp_wifi_connect();
+        }
+
+        /* Daj trochę czasu na stabilizację przed kolejnym sprawdzeniem */
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
  *  Inicjalizacja WiFi
  * ══════════════════════════════════════════════════════════════ */
 
@@ -1067,7 +1247,7 @@ static void init_wifi(void)
     wifi_config_t ap_cfg = {
         .ap = {
             .channel = 0,
-            .authmode = WIFI_AUTH_WPA2_WPA3_PSK,
+            .authmode = (wifi_auth_mode_t)s_cfg.ap_authmode,
             .pmf_cfg = { .required = false, .capable = true },
             .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
         },
@@ -1079,6 +1259,7 @@ static void init_wifi(void)
     if (strlen(s_cfg.ap_pass) == 0) {
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
+    ESP_LOGI(TAG, "AP authmode: %d", ap_cfg.ap.authmode);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
     /* Bandwidth: HE (C6) wymaga HT20; bez HE (S3) HT40 daje lepszy throughput */
@@ -1139,6 +1320,14 @@ void app_main(void)
     ESP_LOGI(TAG, "  Repeater: %s", s_cfg.ap_ssid);
     ESP_LOGI(TAG, "  TX Power: %d dBm, Max clients: %d",
              s_cfg.tx_power_dbm, s_cfg.max_clients);
+    ESP_LOGI(TAG, "  AP Clone SSID: %s", s_cfg.ap_clone_ssid ? "ON" : "OFF");
+    ESP_LOGI(TAG, "  Pseudo-mesh: %s%s",
+             s_cfg.pseudo_mesh ? "ON" : "OFF",
+             s_cfg.pseudo_mesh ? "" : "");
+    if (s_cfg.pseudo_mesh) {
+        ESP_LOGI(TAG, "    RSSI threshold: %d dBm, Hysteresis: %d dB",
+                 (int)s_cfg.roam_rssi_threshold, (int)s_cfg.roam_hysteresis);
+    }
     ESP_LOGI(TAG, "  Config GUI: http://192.168.4.1 (before upstream connect)");
     ESP_LOGI(TAG, "              After upstream connect: same IP as STA");
 
@@ -1146,6 +1335,11 @@ void app_main(void)
     repeater_httpd_start();
 
     xTaskCreate(status_task, "status", 4096, NULL, 5, NULL);
+
+    /* Start roaming task if pseudo-mesh enabled */
+    if (s_cfg.pseudo_mesh) {
+        xTaskCreate(roaming_task, "roaming", 4096, NULL, 5, NULL);
+    }
 
     ESP_LOGI(TAG, "Waiting for connections...");
 }

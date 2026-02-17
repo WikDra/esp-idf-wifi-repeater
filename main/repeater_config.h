@@ -26,6 +26,14 @@ typedef struct {
     /* Radio */
     uint8_t  tx_power_dbm;        /* 2–20 */
     uint8_t  max_clients;         /* 1–10 */
+    /* Security */
+    uint8_t  ap_authmode;         /* wifi_auth_mode_t: 2=WPA,3=WPA2,4=WPA/WPA2,7=WPA2/WPA3,6=WPA3 */
+    /* AP cloning */
+    uint8_t  ap_clone_ssid;       /* 0=off, 1=clone upstream SSID to AP */
+    /* Roaming (pseudo-mesh) */
+    uint8_t  pseudo_mesh;         /* 0=off, 1=roam to better AP with same SSID */
+    int8_t   roam_rssi_threshold; /* dBm, scan when RSSI drops below this */
+    uint8_t  roam_hysteresis;     /* dB, new AP must be this much better */
 } repeater_config_t;
 
 /**

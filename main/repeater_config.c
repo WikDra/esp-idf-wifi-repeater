@@ -45,6 +45,21 @@ esp_err_t repeater_config_load(repeater_config_t *cfg)
         strlcpy(cfg->ap_pass,  CONFIG_REPEATER_AP_PASSWORD, sizeof(cfg->ap_pass));
         cfg->tx_power_dbm = CONFIG_REPEATER_TX_POWER;
         cfg->max_clients  = CONFIG_REPEATER_MAX_CLIENTS;
+        cfg->ap_authmode  = CONFIG_REPEATER_AP_AUTHMODE_VAL;
+#ifdef CONFIG_REPEATER_AP_CLONE_SSID
+        cfg->ap_clone_ssid = 1;
+#else
+        cfg->ap_clone_ssid = 0;
+#endif
+#ifdef CONFIG_REPEATER_PSEUDO_MESH
+        cfg->pseudo_mesh = 1;
+        cfg->roam_rssi_threshold = CONFIG_REPEATER_ROAM_RSSI_THRESHOLD;
+        cfg->roam_hysteresis = CONFIG_REPEATER_ROAM_HYSTERESIS;
+#else
+        cfg->pseudo_mesh = 0;
+        cfg->roam_rssi_threshold = -70;
+        cfg->roam_hysteresis = 8;
+#endif
         return ESP_OK;
     }
     if (err != ESP_OK) return err;
@@ -56,6 +71,26 @@ esp_err_t repeater_config_load(repeater_config_t *cfg)
     load_str(h, "ap_pass",  cfg->ap_pass,  sizeof(cfg->ap_pass),  CONFIG_REPEATER_AP_PASSWORD);
     load_u8(h, "tx_power", &cfg->tx_power_dbm, CONFIG_REPEATER_TX_POWER);
     load_u8(h, "max_cli",  &cfg->max_clients,  CONFIG_REPEATER_MAX_CLIENTS);
+    load_u8(h, "authmode", &cfg->ap_authmode,   CONFIG_REPEATER_AP_AUTHMODE_VAL);
+#ifdef CONFIG_REPEATER_AP_CLONE_SSID
+    load_u8(h, "clone_ssid", &cfg->ap_clone_ssid, 1);
+#else
+    load_u8(h, "clone_ssid", &cfg->ap_clone_ssid, 0);
+#endif
+#ifdef CONFIG_REPEATER_PSEUDO_MESH
+    load_u8(h, "pmesh",    &cfg->pseudo_mesh,       1);
+    {
+        uint8_t thr;
+        load_u8(h, "roam_rssi", &thr, (uint8_t)(int8_t)CONFIG_REPEATER_ROAM_RSSI_THRESHOLD);
+        cfg->roam_rssi_threshold = (int8_t)thr;
+    }
+    load_u8(h, "roam_hyst", &cfg->roam_hysteresis, CONFIG_REPEATER_ROAM_HYSTERESIS);
+#else
+    load_u8(h, "clone_ssid", &cfg->ap_clone_ssid, 0);
+    load_u8(h, "pmesh",      &cfg->pseudo_mesh,   0);
+    cfg->roam_rssi_threshold = -70;
+    cfg->roam_hysteresis = 8;
+#endif
 
     nvs_close(h);
     return ESP_OK;
@@ -73,6 +108,11 @@ esp_err_t repeater_config_save(const repeater_config_t *cfg)
     nvs_set_str(h, "ap_pass",  cfg->ap_pass);
     nvs_set_u8(h,  "tx_power", cfg->tx_power_dbm);
     nvs_set_u8(h,  "max_cli",  cfg->max_clients);
+    nvs_set_u8(h,  "authmode", cfg->ap_authmode);
+    nvs_set_u8(h,  "clone_ssid", cfg->ap_clone_ssid);
+    nvs_set_u8(h,  "pmesh",    cfg->pseudo_mesh);
+    nvs_set_u8(h,  "roam_rssi", (uint8_t)cfg->roam_rssi_threshold);
+    nvs_set_u8(h,  "roam_hyst", cfg->roam_hysteresis);
 
     err = nvs_commit(h);
     nvs_close(h);

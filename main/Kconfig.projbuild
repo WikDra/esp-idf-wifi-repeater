@@ -33,6 +33,72 @@ menu "WiFi Repeater Configuration"
             default 4
             help
                 Maksymalna liczba klientów podłączonych do AP repeatera.
+
+        choice REPEATER_AP_AUTHMODE
+            prompt "AP Authentication Mode (default)"
+            default REPEATER_AP_AUTH_WPA2_WPA3
+            help
+                Domyślny tryb uwierzytelniania AP repeatera.
+                Nadpisywany przez NVS / web GUI.
+
+            config REPEATER_AP_AUTH_WPA
+                bool "WPA-PSK"
+            config REPEATER_AP_AUTH_WPA2
+                bool "WPA2-PSK"
+            config REPEATER_AP_AUTH_WPA_WPA2
+                bool "WPA/WPA2-PSK"
+            config REPEATER_AP_AUTH_WPA2_WPA3
+                bool "WPA2/WPA3-PSK"
+            config REPEATER_AP_AUTH_WPA3
+                bool "WPA3-PSK"
+        endchoice
+
+        config REPEATER_AP_AUTHMODE_VAL
+            int
+            default 2 if REPEATER_AP_AUTH_WPA
+            default 3 if REPEATER_AP_AUTH_WPA2
+            default 4 if REPEATER_AP_AUTH_WPA_WPA2
+            default 7 if REPEATER_AP_AUTH_WPA2_WPA3
+            default 6 if REPEATER_AP_AUTH_WPA3
+
+        config REPEATER_AP_CLONE_SSID
+            bool "Clone upstream AP SSID for Repeater AP"
+            default n
+            help
+                Gdy włączone, AP repeatera automatycznie przejmuje SSID
+                upstream AP (po połączeniu STA). Klienci widzą tę samą
+                sieć co upstream — repeater działa przezroczyście.
+                Pole "Repeater AP SSID" jest wtedy ignorowane.
+    endmenu
+
+    menu "Roaming (Pseudo-Mesh)"
+        config REPEATER_PSEUDO_MESH
+            bool "Enable pseudo-mesh roaming"
+            default n
+            help
+                Gdy włączone, repeater monitoruje RSSI upstream AP.
+                Jeśli sygnał spadnie poniżej progu, skanuje w poszukiwaniu
+                innego AP z tym samym SSID ale innym BSSID (pomijając
+                własny AP). Przełącza się na AP z najlepszym sygnałem.
+
+        config REPEATER_ROAM_RSSI_THRESHOLD
+            int "Roaming RSSI threshold (dBm)"
+            depends on REPEATER_PSEUDO_MESH
+            range -90 -30
+            default -70
+            help
+                Jeśli RSSI upstream AP spadnie poniżej tej wartości,
+                repeater rozpocznie skanowanie w poszukiwaniu lepszego AP.
+                Wartość w dBm (np. -70 = dość słaby sygnał).
+
+        config REPEATER_ROAM_HYSTERESIS
+            int "Roaming hysteresis (dB)"
+            depends on REPEATER_PSEUDO_MESH
+            range 3 20
+            default 8
+            help
+                Nowy AP musi mieć RSSI o tyle dB lepszy od obecnego,
+                żeby nastąpił roaming. Zapobiega ciągłemu przełączaniu.
     endmenu
 
     menu "Radio Settings"

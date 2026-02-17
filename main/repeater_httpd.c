@@ -93,6 +93,34 @@ static const char HTML_PAGE[] =
 "<label>TX Power (dBm)</label>"
 "<input name='tx_pwr' type='number' min='2' max='20' value='%d'>"
 "</div></div>"
+"<label>Security</label>"
+"<select name='authmode' style='width:100%%;padding:.55rem .7rem;border:1px solid #475569;"
+"border-radius:8px;background:#0f172a;color:#e2e8f0;font-size:.95rem'>"
+"<option value='2'%s>WPA-PSK</option>"
+"<option value='3'%s>WPA2-PSK</option>"
+"<option value='4'%s>WPA/WPA2-PSK</option>"
+"<option value='7'%s>WPA2/WPA3-PSK</option>"
+"<option value='6'%s>WPA3-PSK</option>"
+"</select>"
+"</div>"
+/* AP Clone + Roaming card */
+"<div class='card'>"
+"<h2>&#128257; AP Clone &amp; Roaming</h2>"
+"<label style='display:flex;align-items:center;gap:.5rem;margin-top:0;cursor:pointer'>"
+"<input type='checkbox' name='clone_ssid' value='1'%s style='width:1.1rem;height:1.1rem'>"
+"<span>Clone upstream SSID (AP uses same name as router)</span></label>"
+"<label style='display:flex;align-items:center;gap:.5rem;cursor:pointer'>"
+"<input type='checkbox' name='pmesh' value='1'%s id='pm' style='width:1.1rem;height:1.1rem' onchange='toggleMesh()'>"
+"<span>Pseudo-mesh roaming (switch to better AP)</span></label>"
+"<div id='meshcfg' style='display:%s'>"
+"<div class='row'><div>"
+"<label>RSSI threshold (dBm)</label>"
+"<input name='roam_rssi' type='number' min='-90' max='-30' value='%d'>"
+"</div><div>"
+"<label>Hysteresis (dB)</label>"
+"<input name='roam_hyst' type='number' min='3' max='20' value='%d'>"
+"</div></div>"
+"</div>"
 "</div>"
 "<button class='btn btn-save' type='submit'>&#128190; Save &amp; Reboot</button>"
 "</form>"
@@ -102,6 +130,8 @@ static const char HTML_PAGE[] =
 "</div>"
 /* JS: fetch status */
 "<script>"
+"function toggleMesh(){"
+"document.getElementById('meshcfg').style.display=document.getElementById('pm').checked?'block':'none'}"
 "function fs(){"
 "fetch('/status').then(r=>r.json()).then(d=>{"
 "let h='';"
@@ -211,7 +241,21 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     html_escape(e_ap_ssid,  cfg.ap_ssid,  sizeof(e_ap_ssid));
     html_escape(e_ap_pass,  cfg.ap_pass,  sizeof(e_ap_pass));
 
-    /* Render — HTML_PAGE has 6 format specifiers */
+    /* Build "selected" attributes for authmode dropdown */
+    const char *sel = " selected";
+    const char *sel_wpa   = (cfg.ap_authmode == 2) ? sel : "";
+    const char *sel_wpa2  = (cfg.ap_authmode == 3) ? sel : "";
+    const char *sel_mixed = (cfg.ap_authmode == 4) ? sel : "";
+    const char *sel_w2w3  = (cfg.ap_authmode == 7) ? sel : "";
+    const char *sel_wpa3  = (cfg.ap_authmode == 6) ? sel : "";
+
+    /* Build "checked" for clone + mesh checkboxes */
+    const char *chk = " checked";
+    const char *chk_clone = cfg.ap_clone_ssid ? chk : "";
+    const char *chk_mesh  = cfg.pseudo_mesh   ? chk : "";
+    const char *mesh_disp = cfg.pseudo_mesh   ? "block" : "none";
+
+    /* Render — HTML_PAGE has 18 format specifiers */
     size_t buf_len = sizeof(HTML_PAGE) + 1024;
     char *buf = malloc(buf_len);
     if (!buf) {
@@ -221,7 +265,10 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     snprintf(buf, buf_len, HTML_PAGE,
              e_sta_ssid, e_sta_pass,
              e_ap_ssid, e_ap_pass,
-             cfg.max_clients, cfg.tx_power_dbm);
+             cfg.max_clients, cfg.tx_power_dbm,
+             sel_wpa, sel_wpa2, sel_mixed, sel_w2w3, sel_wpa3,
+             chk_clone, chk_mesh, mesh_disp,
+             (int)cfg.roam_rssi_threshold, (int)cfg.roam_hysteresis);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
@@ -260,6 +307,22 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     if (get_field(body, "tx_pwr", tmp, sizeof(tmp))) {
         int v = atoi(tmp);
         if (v >= 2 && v <= 20) cfg.tx_power_dbm = v;
+    }
+    if (get_field(body, "authmode", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v == 2 || v == 3 || v == 4 || v == 6 || v == 7)
+            cfg.ap_authmode = v;
+    }
+    /* Checkboxes: present in body only when checked */
+    cfg.ap_clone_ssid = get_field(body, "clone_ssid", tmp, sizeof(tmp)) ? 1 : 0;
+    cfg.pseudo_mesh   = get_field(body, "pmesh", tmp, sizeof(tmp))      ? 1 : 0;
+    if (get_field(body, "roam_rssi", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v >= -90 && v <= -30) cfg.roam_rssi_threshold = (int8_t)v;
+    }
+    if (get_field(body, "roam_hyst", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v >= 3 && v <= 20) cfg.roam_hysteresis = (uint8_t)v;
     }
 
     esp_err_t err = repeater_config_save(&cfg);

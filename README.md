@@ -50,6 +50,9 @@ Repeater posiada wbudowaną stronę konfiguracyjną — zmiana ustawień bez rek
 - SSID i hasło repeatera (naszego AP)
 - Moc nadawania (TX power)
 - Maksymalna liczba klientów
+- Tryb uwierzytelniania AP (WPA / WPA2 / WPA/WPA2 / WPA2/WPA3 / WPA3)
+- Klonowanie SSID upstream (AP repeater przejmuje nazwę sieci routera)
+- Pseudo-mesh roaming (próg RSSI + histereza)
 - Reset do ustawień domyślnych
 
 Ustawienia zapisywane w **NVS** (pamięć nieulotna) — przetrwają restart i reflash.
@@ -71,7 +74,12 @@ W menu **"WiFi Repeater Configuration"**:
 | Repeater AP SSID | SSID naszego repeatera | MyRepeater |
 | Repeater AP Password | Hasło repeatera | repeater123 |
 | Max connected clients | Max klientów | 4 |
+| AP Authentication Mode | Tryb uwierzytelniania AP | WPA2/WPA3-PSK |
+| Clone upstream SSID | AP przejmuje SSID routera | Nie |
 | TX Power (dBm) | Moc nadawania | 20 |
+| Enable pseudo-mesh roaming | Roaming do lepszego AP z tym samym SSID | Nie |
+| Roaming RSSI threshold | Próg RSSI do rozpoczęcia skanowania | -70 dBm |
+| Roaming hysteresis | Nowy AP musi być lepszy o tyle dB | 8 dB |
 | Enable HTTP config GUI | Web GUI do konfiguracji | Tak |
 | HTTP server port | Port serwera HTTP | 80 |
 
@@ -137,6 +145,28 @@ Repeater obsługuje **do 4 klientów jednocześnie** mimo ograniczenia jednego M
 - **Licznik klientów** oparty na `esp_wifi_ap_get_sta_list()` zamiast manualnych ++/-- (odporny na duplikaty event leave z SA Query timeout)
 - **Auto-clone po restore**: jeśli klient dołączy podczas przywracania MAC (3s okno), repeater automatycznie klonuje MAC po zakończeniu restore
 - **Re-clone przy odejściu primary**: jeśli primary client odchodzi a inni zostają, MAC jest re-klonowany pod pierwszego dostępnego klienta
+
+## AP Clone SSID
+
+Gdy włączone (`Clone upstream SSID` w GUI lub `REPEATER_AP_CLONE_SSID` w menuconfig), repeater **automatycznie kopiuje SSID upstream AP** na swój AP po połączeniu STA. Klienci widzą tę samą nazwę sieci co router — repeater działa przezroczyście.
+
+- Pole "Repeater AP SSID" jest wtedy ignorowane
+- SSID aktualizowane dynamicznie po każdym połączeniu STA
+- Przydatne do rozszerzania zasięgu istniejącej sieci bez zmiany nazwy
+
+## Pseudo-mesh roaming
+
+Gdy włączone (`REPEATER_PSEUDO_MESH` w menuconfig lub checkbox w GUI), repeater monitoruje jakość sygnału upstream AP i automatycznie przełącza się na lepszy AP z tym samym SSID:
+
+1. **Monitoring** — co 10 sekund sprawdza RSSI upstream AP
+2. **Skanowanie** — jeśli RSSI < próg (domyślnie -70 dBm), skanuje w poszukiwaniu AP z tym samym SSID
+3. **Filtrowanie BSSID** — pomija własny AP (`s_ap_mac`) żeby nie połączyć się sam do siebie
+4. **Histereza** — nowy AP musi mieć RSSI lepszy o co najmniej `hysteresis` dB (domyślnie 8) od obecnego
+5. **Roaming** — rozłącza STA i łączy z nowym BSSID, po roamingu 30s cooldown
+
+Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming między piętrami itp.).
+
+> **Uwaga**: Na ESP32-C6 z wbudowaną anteną PCB zasięg jest ograniczony — próg RSSI warto dostosować do warunków.
 
 ## Ograniczenia
 
