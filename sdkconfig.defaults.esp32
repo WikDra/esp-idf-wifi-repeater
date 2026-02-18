@@ -1,0 +1,2 @@
+# ESP32 (classic): WiFi 4 (11b/g/n), dual-core Xtensa LX6, max 240 MHz
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
