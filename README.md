@@ -1,6 +1,6 @@
 # ESP32 WiFi Repeater (bez NAT)
 
-Repeater WiFi oparty na **ESP32-C6** (WiFi 6 / 802.11ax) lub **ESP32-S3** (WiFi 5 / 802.11n), z **wieloklientowym MAC-NAT**, **web GUI** do konfiguracji w locie i przezroczystym L2 bridgingiem.
+Repeater WiFi oparty na **ESP32-C6** (WiFi 6 / 802.11ax), **ESP32-S3** (WiFi 5 / 802.11n) lub **ESP32-C3** (WiFi 4 / 802.11n), z **wieloklientowym MAC-NAT**, **web GUI** do konfiguracji w locie i przezroczystym L2 bridgingiem.
 
 > **Testowane na ESP-IDF v5.5.1**
 
@@ -22,12 +22,12 @@ Repeater **nie zmienia podsieci**. Wszyscy klienci (do 4) podłączeni do repeat
 
 ### Obsługiwane SoC
 
-| Cecha | ESP32-C6 | ESP32-S3 |
-|---|---|---|
-| WiFi | WiFi 6 (802.11ax) | WiFi 5 (802.11n) |
-| CPU | RISC-V 160 MHz single-core | Xtensa LX7 240 MHz dual-core |
-| Bandwidth | HT20 (wymagane dla HE) | HT40 |
-| PSRAM | Brak | Opcjonalny (nieużywany) |
+| Cecha | ESP32-C6 | ESP32-S3 | ESP32-C3 |
+|---|---|---|---|
+| WiFi | WiFi 6 (802.11ax) | WiFi 5 (802.11n) | WiFi 4 (802.11n) |
+| CPU | RISC-V 160 MHz single-core | Xtensa LX7 240 MHz dual-core | RISC-V 160 MHz single-core |
+| Bandwidth | HT20 (wymagane dla HE) | HT40 | HT40 |
+| PSRAM | Brak | Opcjonalny (nieużywany) | Brak |
 
 Kompatybilność wsteczna: klienci WiFi 4/5 łączą się bez problemu z obydwoma wariantami.
 
@@ -97,11 +97,16 @@ idf.py -p COMx flash monitor
 idf.py set-target esp32s3
 idf.py build
 idf.py -p COMx flash monitor
+
+# ESP32-C3 (WiFi 4)
+idf.py set-target esp32c3
+idf.py build
+idf.py -p COMx flash monitor
 ```
 
 ## Szybki start
 
-1. **Flash** firmware na ESP32-C6 lub ESP32-S3
+1. **Flash** firmware na ESP32-C6, ESP32-S3 lub ESP32-C3
 2. **Połącz się** z siecią WiFi `MyRepeater` (hasło: `repeater123`)
 3. **Otwórz** `http://192.168.4.1` w przeglądarce
 4. **Wpisz** SSID i hasło swojego routera → **Save & Reboot**
@@ -171,7 +176,7 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 ## Ograniczenia
 
 - ESP32 ma **jedno radio** — STA i AP muszą pracować na tym samym kanale (automatycznie dopasowywany)
-- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20)
+- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20). ESP32-C3 osiąga podobne wyniki do S3 (WiFi 4 HT40)
 - STA MAC sklonowany pod jednego klienta (primary) — dodatkowi klienci obsługiwani przez MAC-NAT
 - Maksymalnie **8 wpisów** w tablicy MAC-NAT (LRU eviction)
 - `esp_wifi_internal_reg_rxcb` to wewnętrzne API ESP-IDF — może się zmienić w przyszłych wersjach
@@ -184,7 +189,7 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 │                                                      │
 │  ┌─────────┐  L2 Bridge + MAC-NAT  ┌──────────┐     │
 │  │  STA    │◄──────────────────────►│   AP     │     │
-│  │(WiFi6/5)│  MAC clone + rewrite   │(WiFi6/5) │     │
+│  │(WiFi6/5/4)│ MAC clone + rewrite  │(WiFi6/5/4)│     │
 │  └────┬────┘                        └────┬─────┘     │
 │       │                                  │           │
 │  on_sta_rx():                       on_ap_rx():      │

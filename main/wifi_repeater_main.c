@@ -1,7 +1,7 @@
 /*
  * ESP32 WiFi Repeater (bez NAT, ta sama podsieć)
  *
- * Obsługiwane SoC: ESP32-C6 (WiFi 6), ESP32-S3 (WiFi 5)
+ * Obsługiwane SoC: ESP32-C6 (WiFi 6), ESP32-S3 (WiFi 5), ESP32-C3 (WiFi 4)
  *
  * Architektura:
  *   ESP32-C6 działa w trybie APSTA (jednoczesne STA + SoftAP).
