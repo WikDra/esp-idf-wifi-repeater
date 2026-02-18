@@ -1,91 +1,91 @@
-# ESP32 WiFi Repeater (bez NAT)
+# ESP32 WiFi Repeater (no NAT)
 
-Repeater WiFi oparty na **ESP32-C6** (WiFi 6 / 802.11ax), **ESP32-S3** (WiFi 4 / 802.11n), **ESP32-C3** (WiFi 4 / 802.11n) lub **ESP32** (WiFi 4 / 802.11b/g/n), z **wieloklientowym MAC-NAT**, **web GUI** do konfiguracji w locie i przezroczystym L2 bridgingiem.
+WiFi repeater based on **ESP32-C6** (WiFi 6 / 802.11ax), **ESP32-S3** (WiFi 4 / 802.11n), **ESP32-C3** (WiFi 4 / 802.11n) or **ESP32** (WiFi 4 / 802.11b/g/n), with **multi-client MAC-NAT**, **web GUI** for on-the-fly configuration and transparent L2 bridging.
 
-> **Testowane na ESP-IDF v5.5.1**
+> **Tested on ESP-IDF v5.5.1** | [🇵🇱 Polish README](README.pl.md)
 
-## Jak działa
+## How it works
 
 ```
-[Internet] ─── [Router/AP] ════WiFi════ [ESP32 Repeater] ════WiFi════ [Klienci]
-                upstream AP          STA ◄──► AP              (ta sama podsieć!)
+[Internet] ─── [Router/AP] ════WiFi════ [ESP32 Repeater] ════WiFi════ [Clients]
+                upstream AP          STA ◄──► AP              (same subnet!)
 ```
 
-### Bez NAT — ta sama podsieć
+### No NAT — same subnet
 
-Repeater **nie zmienia podsieci**. Wszyscy klienci (do 4) podłączeni do repeatera dostają IP z DHCP routera upstream, jakby byli podłączeni bezpośrednio.
+The repeater **does not change the subnet**. All clients (up to 4) connected to the repeater get IPs from the upstream router's DHCP, as if connected directly.
 
-**Mechanizm: MAC cloning + MAC-NAT + L2 bridging**
+**Mechanism: MAC cloning + MAC-NAT + L2 bridging**
 
-- **Primary client**: Repeater klonuje MAC pierwszego klienta na STA. Upstream AP myśli, że komunikuje się bezpośrednio z klientem. Przezroczysty bridge.
-- **Dodatkowi klienci (MAC-NAT)**: Repeater przepisuje `src MAC` na sklonowany MAC upstream, a odpowiedzi kieruje po tablicy `IP→MAC` do właściwego klienta. DHCP broadcast flag jest automatycznie ustawiany dla non-primary klientów, żeby serwer DHCP odpowiadał broadcastem (unicast do chaddr byłby odrzucony przez WiFi HW filter).
+- **Primary client**: The repeater clones the first client's MAC to the STA. The upstream AP thinks it's communicating directly with the client. Transparent bridge.
+- **Additional clients (MAC-NAT)**: The repeater rewrites `src MAC` to the cloned upstream MAC, and routes responses via an `IP→MAC` table to the correct client. DHCP broadcast flag is automatically set for non-primary clients so the DHCP server replies with broadcast (unicast to chaddr would be rejected by WiFi HW filter).
 
-### Obsługiwane SoC
+### Supported SoCs
 
-| Cecha | ESP32-C6 | ESP32-S3 | ESP32-C3 | ESP32 |
+| Feature | ESP32-C6 | ESP32-S3 | ESP32-C3 | ESP32 |
 |---|---|---|---|---|
 | WiFi | WiFi 6 (802.11ax) | WiFi 4 (802.11n) | WiFi 4 (802.11n) | WiFi 4 (802.11b/g/n) |
 | CPU | RISC-V 160 MHz single-core | Xtensa LX7 240 MHz dual-core | RISC-V 160 MHz single-core | Xtensa LX6 240 MHz dual-core |
-| Bandwidth | HT20 (wymagane dla HE) | HT40 | HT40 | HT40 |
-| PSRAM | Brak | Opcjonalny (nieużywany) | Brak | Opcjonalny (nieużywany) |
+| Bandwidth | HT20 (required for HE) | HT40 | HT40 | HT40 |
+| PSRAM | No | Optional (unused) | No | Optional (unused) |
 
-Kompatybilność wsteczna: klienci WiFi 4/5 łączą się bez problemu ze wszystkimi wariantami.
+Backwards compatible: WiFi 4/5/6 clients connect without issues to all variants.
 
 ## Web GUI
 
-Repeater posiada wbudowaną stronę konfiguracyjną — zmiana ustawień bez rekompilacji.
+The repeater has a built-in configuration page — change settings without recompiling.
 
-### Jak się dostać
+### How to access
 
-| Stan | Adres GUI | Jak |
+| State | GUI address | How |
 |---|---|---|
-| **Przed połączeniem z routerem** | `http://192.168.4.1` | Połącz się z AP repeatera, dostajesz IP z jego DHCP (192.168.4.x) |
-| **Po połączeniu (bridge aktywny)** | `http://<podsieć>.254` | ESP sniffuje DHCP ACK i ustawia AP na najwyższy wolny IP w podsieci klienta (np. `http://192.168.8.254`) |
+| **Before connecting to router** | `http://192.168.4.1` | Connect to the repeater's AP, get IP from its DHCP (192.168.4.x) |
+| **After connecting (bridge active)** | `http://<subnet>.254` | ESP sniffs DHCP ACK and sets AP to the highest free IP in the client's subnet (e.g. `http://192.168.8.254`) |
 
-> **Zero konfiguracji ręcznej** — nie trzeba zmieniać ustawień IP na telefonie/laptopie.
+> **Zero manual configuration** — no need to change IP settings on phone/laptop.
 
-### Co można ustawić w GUI
+### Configurable settings
 
-- SSID i hasło upstream AP (do którego się łączymy)
-- SSID i hasło repeatera (naszego AP)
-- Moc nadawania (TX power)
-- Maksymalna liczba klientów
-- Tryb uwierzytelniania AP (WPA / WPA2 / WPA/WPA2 / WPA2/WPA3 / WPA3)
-- Klonowanie SSID upstream (AP repeater przejmuje nazwę sieci routera)
-- Pseudo-mesh roaming (próg RSSI + histereza)
-- Reset do ustawień domyślnych
+- Upstream AP SSID and password
+- Repeater AP SSID and password
+- TX power
+- Maximum number of clients
+- AP authentication mode (WPA / WPA2 / WPA/WPA2 / WPA2/WPA3 / WPA3)
+- Upstream SSID cloning (repeater AP takes over the router's network name)
+- Pseudo-mesh roaming (RSSI threshold + hysteresis)
+- Reset to defaults
 
-Ustawienia zapisywane w **NVS** (pamięć nieulotna) — przetrwają restart i reflash.
+Settings saved in **NVS** (non-volatile storage) — survive restart and reflash.
 
-GUI włączane/wyłączane w `menuconfig` → `REPEATER_HTTPD_ENABLE`.
+GUI can be enabled/disabled in `menuconfig` → `REPEATER_HTTPD_ENABLE`.
 
-## Konfiguracja (menuconfig)
+## Configuration (menuconfig)
 
 ```bash
 idf.py menuconfig
 ```
 
-W menu **"WiFi Repeater Configuration"**:
+In the **"WiFi Repeater Configuration"** menu:
 
-| Ustawienie | Opis | Domyślna wartość |
+| Setting | Description | Default value |
 |---|---|---|
-| Upstream AP SSID | SSID sieci do której się łączymy | MyUpstreamAP |
-| Upstream AP Password | Hasło upstream AP | password123 |
-| Repeater AP SSID | SSID naszego repeatera | MyRepeater |
-| Repeater AP Password | Hasło repeatera | repeater123 |
-| Max connected clients | Max klientów | 4 |
-| AP Authentication Mode | Tryb uwierzytelniania AP | WPA2/WPA3-PSK |
-| Clone upstream SSID | AP przejmuje SSID routera | Nie |
-| TX Power (dBm) | Moc nadawania | 20 |
-| Enable pseudo-mesh roaming | Roaming do lepszego AP z tym samym SSID | Nie |
-| Roaming RSSI threshold | Próg RSSI do rozpoczęcia skanowania | -70 dBm |
-| Roaming hysteresis | Nowy AP musi być lepszy o tyle dB | 8 dB |
-| Enable HTTP config GUI | Web GUI do konfiguracji | Tak |
-| HTTP server port | Port serwera HTTP | 80 |
+| Upstream AP SSID | SSID of the network to connect to | MyUpstreamAP |
+| Upstream AP Password | Upstream AP password | password123 |
+| Repeater AP SSID | Our repeater's SSID | MyRepeater |
+| Repeater AP Password | Repeater password | repeater123 |
+| Max connected clients | Max clients | 4 |
+| AP Authentication Mode | AP auth mode | WPA2/WPA3-PSK |
+| Clone upstream SSID | AP takes over router's SSID | No |
+| TX Power (dBm) | TX power | 20 |
+| Enable pseudo-mesh roaming | Roam to better AP with same SSID | No |
+| Roaming RSSI threshold | RSSI threshold to start scanning | -70 dBm |
+| Roaming hysteresis | New AP must be better by this many dB | 8 dB |
+| Enable HTTP config GUI | Web GUI for configuration | Yes |
+| HTTP server port | HTTP server port | 80 |
 
-> Wartości z menuconfig są **domyślne** — nadpisywane przez NVS / web GUI po pierwszym zapisie.
+> Values from menuconfig are **defaults** — overridden by NVS / web GUI after first save.
 
-## Budowanie i flashowanie
+## Build and flash
 
 ```bash
 # ESP32-C6 (WiFi 6)
@@ -109,84 +109,84 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-## Szybki start
+## Quick start
 
-1. **Flash** firmware na ESP32-C6, ESP32-S3, ESP32-C3 lub ESP32
-2. **Połącz się** z siecią WiFi `MyRepeater` (hasło: `repeater123`)
-3. **Otwórz** `http://192.168.4.1` w przeglądarce
-4. **Wpisz** SSID i hasło swojego routera → **Save & Reboot**
-5. Repeater łączy się z routerem. Po podłączeniu klienta, GUI dostępne pod `http://<podsieć>.254` (np. `192.168.8.254`)
-6. **Podłącz kolejne urządzenia** — do 4 klientów jednocześnie, wszystkie dostają IP z routera
+1. **Flash** firmware to ESP32-C6, ESP32-S3, ESP32-C3 or ESP32
+2. **Connect** to WiFi network `MyRepeater` (password: `repeater123`)
+3. **Open** `http://192.168.4.1` in a browser
+4. **Enter** your router's SSID and password → **Save & Reboot**
+5. The repeater connects to the router. After a client connects, GUI is available at `http://<subnet>.254` (e.g. `192.168.8.254`)
+6. **Connect more devices** — up to 4 clients simultaneously, all getting IPs from the router
 
 ## Multi-client (MAC-NAT)
 
-Repeater obsługuje **do 4 klientów jednocześnie** mimo ograniczenia jednego MAC na STA:
+The repeater supports **up to 4 clients simultaneously** despite the single MAC limitation on STA:
 
 ```
 ┌──────────────┐          ┌─────────────────────────┐          ┌────────────┐
-│   Router     │          │      ESP32 Repeater      │          │  Klient 1  │
-│              │◄────────►│  STA (MAC=klient1)       │◄────────►│  (primary) │
-│  Widzi       │          │                          │          └────────────┘
-│  jeden MAC   │          │  Tablica MAC-NAT:        │          ┌────────────┐
-│              │          │  IP_2 → MAC_klient2      │◄────────►│  Klient 2  │
-│              │          │  IP_3 → MAC_klient3      │          └────────────┘
-│              │          │  IP_4 → MAC_klient4      │          ┌────────────┐
-└──────────────┘          └─────────────────────────┘◄────────►│  Klient 3  │
+│   Router     │          │      ESP32 Repeater      │          │  Client 1  │
+│              │◄────────►│  STA (MAC=client1)       │◄────────►│  (primary) │
+│  Sees        │          │                          │          └────────────┘
+│  one MAC     │          │  MAC-NAT table:          │          ┌────────────┐
+│              │          │  IP_2 → MAC_client2      │◄────────►│  Client 2  │
+│              │          │  IP_3 → MAC_client3      │          └────────────┘
+│              │          │  IP_4 → MAC_client4      │          ┌────────────┐
+└──────────────┘          └─────────────────────────┘◄────────►│  Client 3  │
                                                                └────────────┘
 ```
 
-**Upstream (klient → router):**
-- Src MAC klientów 2-4 przepisywany na sklonowany MAC (primary)
-- Router widzi jeden MAC, niezależnie od liczby klientów
-- Tablica IP→MAC uczona z pakietów klientów (IPv4 src, ARP sender, DHCP chaddr)
+**Upstream (client → router):**
+- Src MAC of clients 2-4 rewritten to cloned MAC (primary)
+- Router sees one MAC regardless of client count
+- IP→MAC table learned from client packets (IPv4 src, ARP sender, DHCP chaddr)
 
-**Downstream (router → klient):**
-- Dst MAC przepisywany z sklonowanego na prawdziwy MAC klienta (lookup po dst IP)
-- ARP target hardware address również przepisywany
+**Downstream (router → client):**
+- Dst MAC rewritten from cloned to real client MAC (lookup by dst IP)
+- ARP target hardware address also rewritten
 
 **DHCP broadcast flag:**
-- Non-primary klienci mają ustawiony broadcast flag w DHCP Discover/Request
-- Router odpowiada broadcastem zamiast unicastem do chaddr
-- Zapobiega odrzuceniu przez WiFi HW filter (STA MAC ≠ chaddr)
-- UDP checksum zerowany po modyfikacji (RFC 768: checksum=0 = "not computed")
+- Non-primary clients have broadcast flag set in DHCP Discover/Request
+- Router responds with broadcast instead of unicast to chaddr
+- Prevents rejection by WiFi HW filter (STA MAC ≠ chaddr)
+- UDP checksum zeroed after modification (RFC 768: checksum=0 = "not computed")
 
-### Niezawodność
+### Reliability
 
-- **Licznik klientów** oparty na `esp_wifi_ap_get_sta_list()` zamiast manualnych ++/-- (odporny na duplikaty event leave z SA Query timeout)
-- **Auto-clone po restore**: jeśli klient dołączy podczas przywracania MAC (3s okno), repeater automatycznie klonuje MAC po zakończeniu restore
-- **Re-clone przy odejściu primary**: jeśli primary client odchodzi a inni zostają, MAC jest re-klonowany pod pierwszego dostępnego klienta
+- **Client counter** based on `esp_wifi_ap_get_sta_list()` instead of manual ++/-- (resistant to duplicate leave events from SA Query timeout)
+- **Auto-clone after restore**: if a client joins during MAC restore (3s window), the repeater automatically clones MAC after restore completes
+- **Re-clone on primary leave**: if primary client leaves while others remain, MAC is re-cloned to the first available client
 
 ## AP Clone SSID
 
-Gdy włączone (`Clone upstream SSID` w GUI lub `REPEATER_AP_CLONE_SSID` w menuconfig), repeater **automatycznie kopiuje SSID upstream AP** na swój AP po połączeniu STA. Klienci widzą tę samą nazwę sieci co router — repeater działa przezroczyście.
+When enabled (`Clone upstream SSID` in GUI or `REPEATER_AP_CLONE_SSID` in menuconfig), the repeater **automatically copies the upstream AP's SSID** to its own AP after STA connects. Clients see the same network name as the router — the repeater acts transparently.
 
-- Pole "Repeater AP SSID" jest wtedy ignorowane
-- SSID aktualizowane dynamicznie po każdym połączeniu STA
-- Przydatne do rozszerzania zasięgu istniejącej sieci bez zmiany nazwy
+- The "Repeater AP SSID" field is then ignored
+- SSID updated dynamically after each STA connection
+- Useful for extending an existing network without changing its name
 
 ## Pseudo-mesh roaming
 
-Gdy włączone (`REPEATER_PSEUDO_MESH` w menuconfig lub checkbox w GUI), repeater monitoruje jakość sygnału upstream AP i automatycznie przełącza się na lepszy AP z tym samym SSID:
+When enabled (`REPEATER_PSEUDO_MESH` in menuconfig or checkbox in GUI), the repeater monitors upstream AP signal quality and automatically switches to a better AP with the same SSID:
 
-1. **Monitoring** — co 10 sekund sprawdza RSSI upstream AP
-2. **Skanowanie** — jeśli RSSI < próg (domyślnie -70 dBm), skanuje w poszukiwaniu AP z tym samym SSID
-3. **Filtrowanie BSSID** — pomija własny AP (`s_ap_mac`) żeby nie połączyć się sam do siebie
-4. **Histereza** — nowy AP musi mieć RSSI lepszy o co najmniej `hysteresis` dB (domyślnie 8) od obecnego
-5. **Roaming** — rozłącza STA i łączy z nowym BSSID, po roamingu 30s cooldown
+1. **Monitoring** — checks upstream AP RSSI every 10 seconds
+2. **Scanning** — if RSSI < threshold (default -70 dBm), scans for APs with the same SSID
+3. **BSSID filtering** — skips own AP (`s_ap_mac`) to avoid connecting to itself
+4. **Hysteresis** — new AP must have RSSI at least `hysteresis` dB better than current (default 8)
+5. **Roaming** — disconnects STA and connects to new BSSID, 30s cooldown after roaming
 
-Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming między piętrami itp.).
+Ideal for scenarios with multiple routers/APs sharing the same SSID (mesh, floor-to-floor roaming, etc.).
 
-> **Uwaga**: Na ESP32-C6 z wbudowaną anteną PCB zasięg jest ograniczony — próg RSSI warto dostosować do warunków.
+> **Note**: On ESP32-C6 with built-in PCB antenna range is limited — RSSI threshold should be tuned to conditions.
 
-## Ograniczenia
+## Limitations
 
-- ESP32 ma **jedno radio** — STA i AP muszą pracować na tym samym kanale (automatycznie dopasowywany)
-- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20). ESP32-C3 osiąga podobne wyniki do S3 (WiFi 4 HT40)
-- STA MAC sklonowany pod jednego klienta (primary) — dodatkowi klienci obsługiwani przez MAC-NAT
-- Maksymalnie **8 wpisów** w tablicy MAC-NAT (LRU eviction)
-- `esp_wifi_internal_reg_rxcb` to wewnętrzne API ESP-IDF — może się zmienić w przyszłych wersjach
+- ESP32 has **one radio** — STA and AP must operate on the same channel (automatically matched)
+- Throughput shared between upstream and downstream (half-duplex) — realistically **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20). ESP32-C3/S3/ESP32 achieve similar results (WiFi 4 HT40)
+- STA MAC cloned for one client (primary) — additional clients handled via MAC-NAT
+- Maximum **8 entries** in MAC-NAT table (LRU eviction)
+- `esp_wifi_internal_reg_rxcb` is an internal ESP-IDF API — may change in future versions
 
-## Architektura
+## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -194,14 +194,14 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 │                                                      │
 │  ┌─────────┐  L2 Bridge + MAC-NAT  ┌──────────┐     │
 │  │  STA    │◄──────────────────────►│   AP     │     │
-│  │(WiFi6/5/4)│ MAC clone + rewrite  │(WiFi6/5/4)│     │
+│  │(WiFi6/4)│  MAC clone + rewrite   │(WiFi6/4) │     │
 │  └────┬────┘                        └────┬─────┘     │
 │       │                                  │           │
 │  on_sta_rx():                       on_ap_rx():      │
-│  - DHCP ACK sniffer (inline)        - MAC-NAT       │
-│  - MAC-NAT downstream                 upstream      │
-│  - forward → AP                     - forward → STA │
-│  - broadcast/unicast → lwIP         - bcast → lwIP  │
+│  - DHCP ACK sniffer (inline)        - MAC-NAT        │
+│  - MAC-NAT downstream                 upstream       │
+│  - forward → AP                     - forward → STA  │
+│  - broadcast/unicast → lwIP         - bcast → lwIP   │
 │       │                                  │           │
 │       │          ┌──────────┐            │           │
 │       └──────────┤ HTTP GUI ├────────────┘           │
@@ -209,30 +209,30 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 │                  └──────────┘                        │
 └───────┼──────────────────────────────┼───────────────┘
         │                              │
-   Upstream AP                    Klienci WiFi
+   Upstream AP                      WiFi clients
    (router)                      (phone, laptop, ...)
 ```
 
 ### DHCP ACK Sniffer
 
-Podczas bridgingu STA DHCP jest wyłączony (MAC sklonowany = kolizja DHCP).
-Pakiety DHCP routera przechodzą przezroczyście przez bridge do klienta.
-Repeater **sniffuje DHCP ACK** w `on_sta_rx()`:
+During bridging, STA DHCP is disabled (MAC cloned = DHCP collision).
+Router DHCP packets pass transparently through the bridge to the client.
+The repeater **sniffs DHCP ACK** in `on_sta_rx()`:
 
-1. **Inline pre-check**: `EtherType=0x0800, UDP, port 67→68` (skip 99.9% pakietów bez function call)
-2. Parsuje: `BOOTREPLY → magic cookie → option 53=ACK`
-3. Wyciąga: **yiaddr** (IP klienta), **subnet mask**, **gateway**
-4. Ustawia AP na `<podsieć>.254` (najwyższy wolny adres, omija IP klienta i gateway)
-5. Uczy tablicę MAC-NAT z `chaddr` (MAC klienta w DHCP payload)
-6. Po pierwszym ACK ustawia flagę `s_ap_ip_from_sniff` — kolejne ACK uczą MAC-NAT ale pomijają przeliczanie IP
+1. **Inline pre-check**: `EtherType=0x0800, UDP, port 67→68` (skips 99.9% of packets without function call)
+2. Parses: `BOOTREPLY → magic cookie → option 53=ACK`
+3. Extracts: **yiaddr** (client IP), **subnet mask**, **gateway**
+4. Sets AP to `<subnet>.254` (highest free address, skips client IP and gateway)
+5. Learns MAC-NAT table from `chaddr` (client MAC in DHCP payload)
+6. After first ACK sets `s_ap_ip_from_sniff` flag — subsequent ACKs update MAC-NAT but skip IP recalculation
 
-Dzięki temu klient na `192.168.8.110` wchodzi na `http://192.168.8.254` — zero konfiguracji.
+This way a client at `192.168.8.110` opens `http://192.168.8.254` — zero configuration.
 
-### Optymalizacje hot-path
+### Hot-path optimizations
 
-Forwarding callbacks (`on_sta_rx`, `on_ap_rx`) są wywoływane dla **każdego pakietu L2**:
+Forwarding callbacks (`on_sta_rx`, `on_ap_rx`) are called for **every L2 packet**:
 
-- DHCP sniffer: inline EtherType+port check, function call tylko dla DHCP (0.1%)
-- MAC-NAT: skip gdy `s_client_count <= 1` (single client = zero overhead)
-- `macnat_learn()`: skip `esp_timer_get_time()` gdy IP+MAC bez zmian (hot path)
-- Brak `IRAM_ATTR` ani `volatile` na counterach (single-core C6 — cache thrashing)
+- DHCP sniffer: inline EtherType+port check, function call only for DHCP (0.1%)
+- MAC-NAT: skip when `s_client_count <= 1` (single client = zero overhead)
+- `macnat_learn()`: skip `esp_timer_get_time()` when IP+MAC unchanged (hot path)
+- No `IRAM_ATTR` or `volatile` on counters (single-core C6 — avoids cache thrashing)
