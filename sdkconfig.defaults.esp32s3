@@ -1,2 +1,2 @@
-# ESP32-S3 specific: WiFi 5 (11n), dual-core Xtensa LX7, max 240 MHz
+# ESP32-S3 specific: WiFi 4 (11n), dual-core Xtensa LX7, max 240 MHz
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
