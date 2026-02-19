@@ -87,6 +87,42 @@ static esp_netif_t *s_ap_netif = NULL;
 static int s_client_count = 0;           /* ile klientów podłączonych do AP */
 static bool s_ap_ip_from_sniff = false;  /* AP IP ustawione z DHCP sniffera */
 
+/* Cached IPs for fast hot-path comparison (network byte order).
+ * Updated when AP/STA IP changes. Avoids esp_netif_get_ip_info() in hot-path. */
+static uint32_t s_ap_ip_cache  = 0;  /* nasz AP IP (np. 192.168.8.254) */
+static uint32_t s_sta_ip_cache = 0;  /* nasz STA IP (link-local dummy lub DHCP) */
+
+/**
+ * Fast hot-path filter: should this broadcast/multicast frame go to lwIP?
+ *
+ * The repeater only needs lwIP for:
+ *  - ARP requests targeting our own IP (so the HTTP GUI / management responds)
+ *
+ * Everything else (mDNS, SSDP, NetBIOS, IPv6 multicast, broadcast DHCP for
+ * other hosts, etc.) is forwarded at L2 but does NOT need to enter our stack.
+ *
+ * Returns true  → pass to esp_netif_receive()
+ * Returns false → free the buffer, skip lwIP
+ */
+static inline bool is_broadcast_for_us(const uint8_t *frame, uint16_t len,
+                                        uint32_t our_ip1, uint32_t our_ip2)
+{
+    /* EtherType at offset 12-13 */
+    uint16_t ethertype = ((uint16_t)frame[12] << 8) | frame[13];
+
+    /* ARP (0x0806) — pass only REQUEST (opcode 1) targeting our IP */
+    if (ethertype == 0x0806 && len >= 42) {
+        uint16_t opcode = ((uint16_t)frame[20] << 8) | frame[21];
+        if (opcode == 1) {  /* ARP REQUEST */
+            uint32_t target_ip;
+            memcpy(&target_ip, frame + 38, 4);  /* ARP target protocol address */
+            if (target_ip == our_ip1 && our_ip1 != 0) return true;
+            if (target_ip == our_ip2 && our_ip2 != 0) return true;
+        }
+    }
+    return false;
+}
+
 /* Runtime config loaded from NVS (or menuconfig defaults) */
 static repeater_config_t s_cfg;
 
@@ -148,10 +184,15 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
     /* Forward WSZYSTKO do klienta na AP */
     esp_wifi_internal_tx(WIFI_IF_AP, buffer, len);
 
-    /* Broadcast/multicast: podaj też do naszego stosu lwIP
-     * (np. ARP, mDNS — przydatne dla diagnostyki) */
+    /* Broadcast/multicast: podaj do lwIP TYLKO jeśli to ARP request o nasz IP.
+     * Inne broadcasty (mDNS, SSDP, NetBIOS, IGMP) — tylko forward, skip lwIP.
+     * Oszczędność: ~10-20k cykli CPU na każdym pominiętym pakiecie. */
     if (dst[0] & 0x01) {
-        esp_netif_receive(s_sta_netif, buffer, len, eb);
+        if (is_broadcast_for_us(dst, len, s_sta_ip_cache, s_ap_ip_cache)) {
+            esp_netif_receive(s_sta_netif, buffer, len, eb);
+            return ESP_OK;
+        }
+        esp_wifi_internal_free_rx_buffer(eb);
         return ESP_OK;
     }
 
@@ -185,12 +226,16 @@ static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
         macnat_rewrite_upstream((uint8_t *)buffer, len);
     }
 
-    /* Broadcast/multicast — forward upstream + podaj do stosu AP */
+    /* Broadcast/multicast — forward upstream + podaj do lwIP TYLKO jeśli dla nas */
     if (dst[0] & 0x01) {
         if (s_sta_connected) {
             esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
         }
-        esp_netif_receive(s_ap_netif, buffer, len, eb);
+        if (is_broadcast_for_us(dst, len, s_ap_ip_cache, s_sta_ip_cache)) {
+            esp_netif_receive(s_ap_netif, buffer, len, eb);
+            return ESP_OK;
+        }
+        esp_wifi_internal_free_rx_buffer(eb);
         return ESP_OK;
     }
 
@@ -557,6 +602,7 @@ static void mac_change_task(void *pvParams)
         /* 5a. Wyczyść tablicę MAC-NAT (nowa sesja bridgingu = nowe mapowania) */
         macnat_clear();
         s_ap_ip_from_sniff = false;
+        s_ap_ip_cache = 0;  /* clear until next DHCP sniff */
 
         /* 5b. Przywróć AP do 192.168.4.1 z DHCP (fallback dostępu do GUI).
          *     Po uzyskaniu IP_EVENT_STA_GOT_IP, AP przełączy się
@@ -881,6 +927,7 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
     esp_netif_dhcps_stop(s_ap_netif);
     esp_netif_set_ip_info(s_ap_netif, &ap_ip);
     s_ap_ip_from_sniff = true;
+    s_ap_ip_cache = ap_ip.ip.addr;  /* update cache for hot-path filter */
 
     ESP_LOGI(TAG, "AP IP set to " IPSTR " (reachable from bridged client on same subnet)",
              IP2STR(&ap_ip.ip));
@@ -912,6 +959,7 @@ static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip)
         .gw      = { .addr = 0 },              /* AP nie potrzebuje GW */
     };
     esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+    s_ap_ip_cache = ap_ip.ip.addr;  /* update cache for hot-path filter */
     ESP_LOGI(TAG, "AP IP mirrored to " IPSTR " (same subnet as upstream)",
              IP2STR(&ap_ip.ip));
 }
@@ -926,6 +974,7 @@ static void ap_restore_management_ip(void)
         .gw      = { .addr = ESP_IP4TOADDR(192, 168, 4, 1) },
     };
     esp_netif_set_ip_info(s_ap_netif, &ap_ip);
+    s_ap_ip_cache = ap_ip.ip.addr;  /* update cache for hot-path filter */
     esp_netif_dhcps_start(s_ap_netif);
     ESP_LOGI(TAG, "AP IP restored to 192.168.4.1 (setup mode, DHCP ON)");
 }
@@ -937,12 +986,14 @@ static void ip_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "=== Got IP: " IPSTR " gw: " IPSTR " ===",
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.gw));
+        s_sta_ip_cache = ev->ip_info.ip.addr;  /* cache for hot-path filter */
         xEventGroupSetBits(s_wifi_event_group, STA_CONNECTED_BIT);
 
         /* Przełącz AP na podsieć upstream — GUI dostępne pod STA IP */
         ap_mirror_sta_ip(&ev->ip_info);
     } else if (id == IP_EVENT_STA_LOST_IP) {
         ESP_LOGW(TAG, "STA lost IP, restoring AP management subnet");
+        s_sta_ip_cache = 0;
         ap_restore_management_ip();
     }
 }
