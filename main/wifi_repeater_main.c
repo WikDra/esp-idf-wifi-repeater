@@ -188,11 +188,15 @@ static esp_err_t on_sta_rx(void *buffer, uint16_t len, void *eb)
      * Inne broadcasty (mDNS, SSDP, NetBIOS, IGMP) — tylko forward, skip lwIP.
      * Oszczędność: ~10-20k cykli CPU na każdym pominiętym pakiecie. */
     if (dst[0] & 0x01) {
+#if CONFIG_REPEATER_BROADCAST_FILTER
         if (is_broadcast_for_us(dst, len, s_sta_ip_cache, s_ap_ip_cache)) {
             esp_netif_receive(s_sta_netif, buffer, len, eb);
             return ESP_OK;
         }
         esp_wifi_internal_free_rx_buffer(eb);
+#else
+        esp_netif_receive(s_sta_netif, buffer, len, eb);
+#endif
         return ESP_OK;
     }
 
@@ -231,11 +235,15 @@ static esp_err_t on_ap_rx(void *buffer, uint16_t len, void *eb)
         if (s_sta_connected) {
             esp_wifi_internal_tx(WIFI_IF_STA, buffer, len);
         }
+#if CONFIG_REPEATER_BROADCAST_FILTER
         if (is_broadcast_for_us(dst, len, s_ap_ip_cache, s_sta_ip_cache)) {
             esp_netif_receive(s_ap_netif, buffer, len, eb);
             return ESP_OK;
         }
         esp_wifi_internal_free_rx_buffer(eb);
+#else
+        esp_netif_receive(s_ap_netif, buffer, len, eb);
+#endif
         return ESP_OK;
     }
 

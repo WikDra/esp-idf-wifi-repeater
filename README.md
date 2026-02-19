@@ -82,6 +82,7 @@ In the **"WiFi Repeater Configuration"** menu:
 | Roaming hysteresis | New AP must be better by this many dB | 8 dB |
 | Enable HTTP config GUI | Web GUI for configuration | Yes |
 | HTTP server port | HTTP server port | 80 |
+| Filter broadcast/multicast | Skip lwIP for non-ARP broadcast (faster) | Yes |
 
 > Values from menuconfig are **defaults** — overridden by NVS / web GUI after first save.
 
@@ -181,7 +182,7 @@ Ideal for scenarios with multiple routers/APs sharing the same SSID (mesh, floor
 ## Limitations
 
 - ESP32 has **one radio** — STA and AP must operate on the same channel (automatically matched)
-- Throughput shared between upstream and downstream (half-duplex) — realistically **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20). ESP32-C3/S3/ESP32 achieve similar results (WiFi 4 HT40)
+- Throughput shared between upstream and downstream (half-duplex) — realistically **~15 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20, broadcast filter ON). ESP32-C3/S3/ESP32 achieve similar results (WiFi 4 HT40)
 - STA MAC cloned for one client (primary) — additional clients handled via MAC-NAT
 - Maximum **8 entries** in MAC-NAT table (LRU eviction)
 - `esp_wifi_internal_reg_rxcb` is an internal ESP-IDF API — may change in future versions
@@ -232,6 +233,7 @@ This way a client at `192.168.8.110` opens `http://192.168.8.254` — zero confi
 
 Forwarding callbacks (`on_sta_rx`, `on_ap_rx`) are called for **every L2 packet**:
 
+- **Broadcast filter** (`CONFIG_REPEATER_BROADCAST_FILTER`, default ON): only ARP requests for our IP enter lwIP; all other broadcast/multicast (mDNS, SSDP, NetBIOS, IGMP, IPv6) forwarded at L2 but skipped by lwIP — saves ~10-20k cycles/packet, measured ~13→15 Mb/s
 - DHCP sniffer: inline EtherType+port check, function call only for DHCP (0.1%)
 - MAC-NAT: skip when `s_client_count <= 1` (single client = zero overhead)
 - `macnat_learn()`: skip `esp_timer_get_time()` when IP+MAC unchanged (hot path)

@@ -129,4 +129,21 @@ menu "WiFi Repeater Configuration"
                 Port serwera HTTP konfiguracyjnego.
     endmenu
 
+    menu "Performance"
+        config REPEATER_BROADCAST_FILTER
+            bool "Filter broadcast/multicast before lwIP"
+            default y
+            help
+                When enabled, only ARP requests targeting the repeater's
+                own IPs are passed to the lwIP stack. All other broadcast
+                and multicast traffic (mDNS, SSDP, NetBIOS, IGMP, IPv6
+                multicast, DHCP for other hosts, etc.) is forwarded at L2
+                but skipped by lwIP — saving ~10-20k CPU cycles per packet.
+
+                Measured improvement: ~13 → 15 Mb/s on ESP32-C6 (WiFi 6 HT20).
+
+                Disable if you need the repeater itself to receive mDNS,
+                SSDP or other multicast/broadcast protocols (rare use case).
+    endmenu
+
 endmenu

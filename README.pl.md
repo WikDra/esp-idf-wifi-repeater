@@ -84,6 +84,7 @@ W menu **"WiFi Repeater Configuration"**:
 | Roaming hysteresis | Nowy AP musi być lepszy o tyle dB | 8 dB |
 | Enable HTTP config GUI | Web GUI do konfiguracji | Tak |
 | HTTP server port | Port serwera HTTP | 80 |
+| Filter broadcast/multicast | Pomijaj lwIP dla nie-ARP broadcastów (szybciej) | Tak |
 
 > Wartości z menuconfig są **domyślne** — nadpisywane przez NVS / web GUI po pierwszym zapisie.
 
@@ -183,7 +184,7 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 ## Ograniczenia
 
 - ESP32 ma **jedno radio** — STA i AP muszą pracować na tym samym kanale (automatycznie dopasowywany)
-- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~13 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20). ESP32-C3 osiąga podobne wyniki do S3 (WiFi 4 HT40)
+- Throughput dzielony między upstream i downstream (half-duplex) — realistycznie **~15 Mbps** (ESP32-C6, `-O2`, WiFi 6 HT20, filtr broadcast WŁ). ESP32-C3 osiąga podobne wyniki do S3 (WiFi 4 HT40)
 - STA MAC sklonowany pod jednego klienta (primary) — dodatkowi klienci obsługiwani przez MAC-NAT
 - Maksymalnie **8 wpisów** w tablicy MAC-NAT (LRU eviction)
 - `esp_wifi_internal_reg_rxcb` to wewnętrzne API ESP-IDF — może się zmienić w przyszłych wersjach
@@ -196,7 +197,7 @@ Idealny dla scenariuszy z wieloma routerami/AP z tym samym SSID (mesh, roaming m
 │                                                      │
 │  ┌─────────┐  L2 Bridge + MAC-NAT  ┌──────────┐     │
 │  │  STA    │◄──────────────────────►│   AP     │     │
-│  │(WiFi6/5/4)│ MAC clone + rewrite  │(WiFi6/5/4)│     │
+│  │(WiFi6/4)│  MAC clone + rewrite   │(WiFi6/4) │     │
 │  └────┬────┘                        └────┬─────┘     │
 │       │                                  │           │
 │  on_sta_rx():                       on_ap_rx():      │
@@ -234,6 +235,7 @@ Dzięki temu klient na `192.168.8.110` wchodzi na `http://192.168.8.254` — zer
 
 Forwarding callbacks (`on_sta_rx`, `on_ap_rx`) są wywoływane dla **każdego pakietu L2**:
 
+- **Filtr broadcast** (`CONFIG_REPEATER_BROADCAST_FILTER`, domyślnie WŁ): tylko ARP requesty do naszego IP trafiają do lwIP; reszta broadcast/multicast (mDNS, SSDP, NetBIOS, IGMP, IPv6) forwardowana na L2 ale pomijana przez lwIP — oszczędność ~10-20k cykli/pakiet, zmierzono ~13→15 Mb/s
 - DHCP sniffer: inline EtherType+port check, function call tylko dla DHCP (0.1%)
 - MAC-NAT: skip gdy `s_client_count <= 1` (single client = zero overhead)
 - `macnat_learn()`: skip `esp_timer_get_time()` gdy IP+MAC bez zmian (hot path)
