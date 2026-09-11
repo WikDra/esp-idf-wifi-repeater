@@ -267,11 +267,19 @@ delivers about half of what the radio can push.
 |---|---|---|
 | ESP32-S3 | WiFi 4, HT40, broadcast filter ON | ~40 Mbps |
 | ESP32-C6 | WiFi 6, HE20, broadcast filter ON | ~15 Mbps |
-| **ESP32-C5** | WiFi 6, **HE20** (20 MHz + 11ax) | **28 Mbps** |
-| **ESP32-C5** | WiFi 4, **HT40** (40 MHz + 11n) | **41 Mbps** |
+| **ESP32-C5** | 2.4 GHz, **HT40** (40 MHz + 11n), 150 Mbps link | **41 Mbps** |
+| **ESP32-C5** | 5 GHz, **HE20** (20 MHz + 11ax), 72 Mbps link | **27.6 / 24.1 Mbps** (down/up) |
+| ESP32-C5 | 2.4 GHz, HT20, 72 Mbps link | 28 Mbps |
 
-Measured with speedtest.net; the phone reported a 150 Mbps link (HT40, one
-spatial stream, short GI).
+Measured with speedtest.net; link rates as reported by a Pixel 7.
+
+The implementation is close to the ceiling: 27.6 Mbps on a 72 Mbps link is 77% of
+the 36 Mbps that half-duplex allows, since every packet crosses the same radio
+twice. The nearly symmetric upload confirms it — the radio does the same work in
+both directions. What is left is 802.11 overhead the application cannot touch.
+
+So **throughput tracks the client link rate**, which in turn tracks channel width
+(the SoftAP is 11n either way, see above).
 
 This is an **airtime** limit, not a CPU limit: doubling the channel width gave
 +46%, which cannot happen if the CPU is the bottleneck — a packet costs the same

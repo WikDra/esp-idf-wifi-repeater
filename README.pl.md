@@ -256,11 +256,19 @@ realnie oddaje mniej więcej połowę tego, co radio potrafi przepchnąć.
 |---|---|---|
 | ESP32-S3 | WiFi 4, HT40, filtr broadcast WŁ | ~40 Mb/s |
 | ESP32-C6 | WiFi 6, HE20, filtr broadcast WŁ | ~15 Mb/s |
-| **ESP32-C5** | WiFi 6, **HE20** (20 MHz + 11ax) | **28 Mb/s** |
-| **ESP32-C5** | WiFi 4, **HT40** (40 MHz + 11n) | **41 Mb/s** |
+| **ESP32-C5** | 2.4 GHz, **HT40** (40 MHz + 11n), link 150 Mb/s | **41 Mb/s** |
+| **ESP32-C5** | 5 GHz, **HE20** (20 MHz + 11ax), link 72 Mb/s | **27,6 / 24,1 Mb/s** (down/up) |
+| ESP32-C5 | 2.4 GHz, HT20, link 72 Mb/s | 28 Mb/s |
 
-Zmierzone przez speedtest.net; telefon raportował link 150 Mb/s (HT40,
-1 strumień, short GI).
+Zmierzone przez speedtest.net; szybkości linku odczytane z Pixela 7.
+
+Implementacja jest blisko sufitu: 27,6 Mb/s przy linku 72 Mb/s to 77% z 36 Mb/s,
+na które pozwala half-duplex, bo każdy pakiet przechodzi przez to samo radio dwa
+razy. Prawie symetryczny upload to potwierdza — w obu kierunkach radio wykonuje
+tę samą pracę. Zostaje narzut 802.11, na który kod aplikacji nie ma wpływu.
+
+Czyli **przepustowość zależy od szybkości linku klienckiego**, a ta od szerokości
+kanału (SoftAP i tak jest 11n, patrz wyżej).
 
 To ograniczenie **czasem antenowym**, nie CPU: podwojenie szerokości kanału dało
 +46%, co nie mogłoby się zdarzyć gdyby ograniczał procesor — pakiet kosztuje

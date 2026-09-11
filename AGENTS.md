@@ -586,11 +586,22 @@ sterownikiem WiFi. Weryfikacja jest z konieczności na sprzęcie.
 |---|---|---|
 | ESP32-S3 | WiFi 4, HT40, filtr broadcast ON | **~40 Mb/s** |
 | ESP32-C6 | WiFi 6, HE20, filtr broadcast ON | ~15 Mb/s |
-| **ESP32-C5** | WiFi 6, **HE20** (20 MHz + 11ax) | **28 Mb/s** |
-| **ESP32-C5** | WiFi 4, **HT40** (40 MHz + 11n) | **41 Mb/s** |
+| **ESP32-C5** | 2.4 GHz, **HT40** (40 MHz + 11n), link 150 Mb/s | **41 Mb/s** |
+| **ESP32-C5** | 5 GHz, **HE20** (20 MHz + 11ax), link 72 Mb/s | **27,6 / 24,1 Mb/s** (down/up) |
+| ESP32-C5 | 2.4 GHz, HT20, link 72 Mb/s | 28 Mb/s |
 
-Zmierzone speedtestem, link telefon↔repeater raportowany jako 150 Mb/s
-(HT40, 1 strumień, short GI).
+Zmierzone speedtestem, szybkość linku odczytana z telefonu (Pixel 7).
+
+### Implementacja jest już blisko sufitu
+
+27,6 Mb/s przy linku 72 Mb/s to **77% teoretycznego maksimum**: bridge przepuszcza
+każdy pakiet przez to samo radio dwa razy, więc sufit to 72 / 2 = 36 Mb/s.
+Prawie symetryczny upload (24,1 Mb/s) to potwierdza — w obu kierunkach radio
+wykonuje tę samą pracę. Zostały tylko narzuty 802.11, na które nie ma wpływu
+kod aplikacji.
+
+Wniosek: **przepustowość zależy prawie wyłącznie od szybkości linku klienckiego**,
+a ta od szerokości kanału (bo SoftAP i tak jest 11n — patrz §7).
 
 ### Dlaczego 40 MHz wygrywa, choć wyłącza 11ax
 
