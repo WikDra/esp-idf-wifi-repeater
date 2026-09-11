@@ -17,7 +17,7 @@ menu "WiFi Repeater Configuration"
     menu "Repeater AP Settings"
         config REPEATER_AP_SSID
             string "Repeater AP SSID (default)"
-            default "MyRepeater"
+            default "MyRepeater1"
             help
                 Domyślny SSID AP repeatera. Nadpisywany przez NVS / web GUI.
 
@@ -36,10 +36,16 @@ menu "WiFi Repeater Configuration"
 
         choice REPEATER_AP_AUTHMODE
             prompt "AP Authentication Mode (default)"
-            default REPEATER_AP_AUTH_WPA2_WPA3
+            default REPEATER_AP_AUTH_WPA2
             help
                 Domyślny tryb uwierzytelniania AP repeatera.
                 Nadpisywany przez NVS / web GUI.
+
+                UWAGA: WPA2/WPA3 (tryb przejściowy) bywa problematyczny —
+                część telefonów próbuje SAE i kończy na
+                "unsuccessful auth/assoc". Dlatego domyślnie jest WPA2-PSK,
+                który działa ze wszystkim. WPA3 możesz włączyć w GUI, jeśli
+                Twoje klienty go poprawnie obsługują.
 
             config REPEATER_AP_AUTH_WPA
                 bool "WPA-PSK"
@@ -108,6 +114,98 @@ menu "WiFi Repeater Configuration"
             default 20
             help
                 Domyślna moc nadawania WiFi w dBm. Nadpisywana przez NVS / web GUI.
+
+        # ── Band mode (tylko SoC z 5 GHz, np. ESP32-C5) ──────────────
+        choice REPEATER_BAND_MODE
+            prompt "WiFi band mode (default)"
+            depends on SOC_WIFI_SUPPORT_5G
+            default REPEATER_BAND_AUTO
+            help
+                Pasmo pracy radia. UWAGA: ESP32-C5 ma jedno radio —
+                "auto" NIE oznacza jednoczesnej pracy dual-band, tylko
+                automatyczny wybór pasma na podstawie upstream AP.
+                Nadpisywane przez NVS / web GUI.
+
+            config REPEATER_BAND_AUTO
+                bool "2.4 GHz + 5 GHz (auto)"
+            config REPEATER_BAND_2G
+                bool "2.4 GHz only"
+            config REPEATER_BAND_5G
+                bool "5 GHz only"
+        endchoice
+
+        # wifi_band_mode_t: 1=2G_ONLY, 2=5G_ONLY, 3=AUTO
+        config REPEATER_BAND_MODE_VAL
+            int
+            default 3 if REPEATER_BAND_AUTO
+            default 1 if REPEATER_BAND_2G
+            default 2 if REPEATER_BAND_5G
+            default 1
+
+        config REPEATER_RSSI_5G_ADJUSTMENT
+            int "Prefer 5 GHz AP margin (dB)"
+            depends on SOC_WIFI_SUPPORT_5G
+            range 0 30
+            default 10
+            help
+                Jeśli AP 5 GHz o tym samym SSID ma RSSI nie gorszy niż
+                (RSSI 2.4 GHz - ta wartość), wybierany jest AP 5 GHz.
+                Wyższa wartość = agresywniejsza preferencja 5 GHz.
+
+        # ── Bandwidth 2.4 GHz ───────────────────────────────────────
+        choice REPEATER_BW_2G
+            prompt "2.4 GHz bandwidth (default)"
+            default REPEATER_BW_2G_20 if SOC_WIFI_HE_SUPPORT
+            default REPEATER_BW_2G_40
+            help
+                UWAGA: 40 MHz i HE/VHT wykluczają się w sterowniku ESP.
+                Wybór 40 MHz automatycznie WYŁĄCZA 11ax w tym pasmie
+                (firmware zdejmie 11AX z maski protokołów).
+
+                20 MHz + 11ax (HE20) = 143 Mbps PHY @ 1SS
+                40 MHz + 11n  (HT40) = 150 Mbps PHY @ 1SS
+                Na SoC z WiFi 6 HE20 jest zwykle lepszym wyborem.
+
+            config REPEATER_BW_2G_20
+                bool "20 MHz (HE / WiFi 6 aktywne)"
+            config REPEATER_BW_2G_40
+                bool "40 MHz (WiFi 4 HT40, bez 11ax)"
+        endchoice
+
+        # wifi_bandwidth_t: 1=WIFI_BW20, 2=WIFI_BW40
+        config REPEATER_BW_2G_VAL
+            int
+            default 1 if REPEATER_BW_2G_20
+            default 2 if REPEATER_BW_2G_40
+
+        # ── Bandwidth 5 GHz ─────────────────────────────────────────
+        choice REPEATER_BW_5G
+            prompt "5 GHz bandwidth (default)"
+            depends on SOC_WIFI_SUPPORT_5G
+            default REPEATER_BW_5G_40
+            help
+                40 MHz wyłącza 11ax/11ac w tym pasmie (firmware zdejmie je
+                z maski protokołów), ale ZMIERZONE na ESP32-C5 przez bridge:
+
+                    HE20 (20 MHz + 11ax) -> 28 Mb/s
+                    HT40 (40 MHz + 11n)  -> 41 Mb/s
+
+                Czyli szerszy kanał wygrywa mimo utraty HE. W 5 GHz kanały są
+                szerokie i mało zajęte, więc 40 MHz jest tu domyślne.
+                Wybierz 20 MHz, jeśli zależy Ci na OFDMA/MU-MIMO albo pracujesz
+                w bardzo zagęszczonym środowisku.
+
+            config REPEATER_BW_5G_20
+                bool "20 MHz (HE20 / WiFi 6 aktywne)"
+            config REPEATER_BW_5G_40
+                bool "40 MHz (11a/11n, bez 11ax/11ac — szybsze)"
+        endchoice
+
+        config REPEATER_BW_5G_VAL
+            int
+            default 1 if REPEATER_BW_5G_20
+            default 2 if REPEATER_BW_5G_40
+            default 2
     endmenu
 
     menu "HTTP Configuration Server"
@@ -130,6 +228,23 @@ menu "WiFi Repeater Configuration"
     endmenu
 
     menu "Performance"
+        config REPEATER_CPU_STATS
+            bool "Report CPU load in the status log"
+            default n
+            select FREERTOS_USE_TRACE_FACILITY
+            select FREERTOS_GENERATE_RUN_TIME_STATS
+            help
+                Dolicza do raportu statusu udział zadania IDLE, czyli ile CPU
+                zostaje wolnego. Służy do odpowiedzi na pytanie "czy throughput
+                ogranicza CPU, czy czas antenowy":
+
+                  idle blisko 0%  -> ogranicza CPU
+                  idle wyraźnie >0% -> ogranicza radio / czas antenowy
+
+                Run-time stats dokładają narzut przy każdym przełączeniu
+                kontekstu, więc trzymaj to WYŁĄCZONE przy pomiarach
+                przepustowości i włączaj tylko na czas diagnozy.
+
         config REPEATER_BROADCAST_FILTER
             bool "Filter broadcast/multicast before lwIP"
             default y
@@ -140,7 +255,7 @@ menu "WiFi Repeater Configuration"
                 multicast, DHCP for other hosts, etc.) is forwarded at L2
                 but skipped by lwIP — saving ~10-20k CPU cycles per packet.
 
-                Measured improvement: ~13 → 15 Mb/s on ESP32-C6 (WiFi 6 HT20).
+                Measured improvement: ~13 → 15 Mb/s on ESP32-C6 (WiFi 6, HE20).
 
                 Disable if you need the repeater itself to receive mDNS,
                 SSDP or other multicast/broadcast protocols (rare use case).

@@ -23,9 +23,60 @@
 #include "esp_system.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "soc/soc_caps.h"
 
 static const char *TAG = "rep_httpd";
 static httpd_handle_t s_server = NULL;
+
+#if SOC_WIFI_SUPPORT_5G
+#define REPEATER_BAND_LABEL "WiFi 6 &middot; 2.4 + 5 GHz"
+#elif SOC_WIFI_HE_SUPPORT
+#define REPEATER_BAND_LABEL "WiFi 6 &middot; 2.4 GHz"
+#else
+#define REPEATER_BAND_LABEL "WiFi 4 &middot; 2.4 GHz"
+#endif
+
+/* ── Band & PHY card ─────────────────────────────────────────────
+ * Rendered into its own buffer and spliced into HTML_PAGE via one %s,
+ * because the available controls depend on the SoC (5 GHz or not).   */
+#if SOC_WIFI_SUPPORT_5G
+static const char BAND_CARD[] =
+"<div class='card'>"
+"<h2>&#128246; Band &amp; PHY</h2>"
+"<label>Band mode</label>"
+"<select name='band' class='sel'>"
+"<option value='3'%s>2.4 GHz + 5 GHz (auto)</option>"
+"<option value='1'%s>2.4 GHz only</option>"
+"<option value='2'%s>5 GHz only</option>"
+"</select>"
+"<div class='row'><div>"
+"<label>2.4 GHz bandwidth</label>"
+"<select name='bw2g' class='sel'>"
+"<option value='1'%s>20 MHz (HE)</option>"
+"<option value='2'%s>40 MHz</option>"
+"</select></div><div>"
+"<label>5 GHz bandwidth</label>"
+"<select name='bw5g' class='sel'>"
+"<option value='1'%s>20 MHz</option>"
+"<option value='2'%s>40 MHz</option>"
+"</select></div></div>"
+"<label>Prefer 5 GHz margin (dB)</label>"
+"<input name='adj5g' type='number' min='0' max='30' value='%d'>"
+"<p style='font-size:.75rem;color:#64748b;margin-top:.5rem'>"
+"Single radio: &quot;auto&quot; picks a band, it does not run both at once."
+"</p>"
+"</div>";
+#else
+static const char BAND_CARD[] =
+"<div class='card'>"
+"<h2>&#128246; Band &amp; PHY</h2>"
+"<label>2.4 GHz bandwidth</label>"
+"<select name='bw2g' class='sel'>"
+"<option value='1'%s>20 MHz (HE)</option>"
+"<option value='2'%s>40 MHz</option>"
+"</select>"
+"</div>";
+#endif
 
 /* ── HTML ────────────────────────────────────────────────────── */
 
@@ -49,6 +100,8 @@ static const char HTML_PAGE[] =
 "width:100%%;padding:.55rem .7rem;border:1px solid #475569;border-radius:8px;"
 "background:#0f172a;color:#e2e8f0;font-size:.95rem;outline:none;transition:border .2s}"
 "input:focus{border-color:#38bdf8}"
+"select.sel{width:100%%;padding:.55rem .7rem;border:1px solid #475569;"
+"border-radius:8px;background:#0f172a;color:#e2e8f0;font-size:.95rem}"
 ".row{display:flex;gap:.6rem}"
 ".row>div{flex:1}"
 ".btn{display:block;width:100%%;padding:.7rem;border:none;border-radius:8px;"
@@ -64,7 +117,8 @@ static const char HTML_PAGE[] =
 "</style></head><body>"
 "<div class='c'>"
 "<h1>&#128225; WiFi6 Repeater</h1>"
-"<p class='sub'>ESP32-C6 &middot; L2 Bridge &middot; No NAT</p>"
+"<p class='sub'>" CONFIG_IDF_TARGET " &middot; " REPEATER_BAND_LABEL
+" &middot; L2 Bridge &middot; No NAT</p>"
 "<div id='msg'></div>"
 /* Status card (filled by JS) */
 "<div class='card' id='scard'>"
@@ -103,6 +157,8 @@ static const char HTML_PAGE[] =
 "<option value='6'%s>WPA3-PSK</option>"
 "</select>"
 "</div>"
+/* Band & PHY card (rendered separately — depends on SoC capabilities) */
+"%s"
 /* AP Clone + Roaming card */
 "<div class='card'>"
 "<h2>&#128257; AP Clone &amp; Roaming</h2>"
@@ -138,6 +194,7 @@ static const char HTML_PAGE[] =
 "h+='State: <b>'+d.state+'</b><br>';"
 "if(d.upstream)h+='Upstream: <b>'+d.upstream+'</b> RSSI:<b>'+d.rssi+'</b> Ch:<b>'+d.channel+'</b><br>';"
 "else h+='Upstream: <span class=\"r\">not connected</span><br>';"
+"if(d.upstream)h+='Link: <b>'+d.band+'</b> &middot; <b>'+d.phy+'</b> &middot; <b>'+d.bw+'</b><br>';"
 "h+='STA MAC: <b>'+d.sta_mac+'</b> '+(d.cloned?'<span class=\"r\">(CLONED)</span>':'')+'<br>';"
 "h+='Clients: <b>'+d.clients+'</b><br>';"
 "h+='Forwarding: '+(d.forwarding?'<span class=\"g\">ON</span>':'OFF')+'<br>';"
@@ -255,8 +312,25 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     const char *chk_mesh  = cfg.pseudo_mesh   ? chk : "";
     const char *mesh_disp = cfg.pseudo_mesh   ? "block" : "none";
 
-    /* Render — HTML_PAGE has 18 format specifiers */
-    size_t buf_len = sizeof(HTML_PAGE) + 1024;
+    /* Band & PHY card */
+    const char *bw2_20 = (cfg.bw_2g == 1) ? sel : "";
+    const char *bw2_40 = (cfg.bw_2g == 2) ? sel : "";
+    char band_card[sizeof(BAND_CARD) + 128];
+#if SOC_WIFI_SUPPORT_5G
+    snprintf(band_card, sizeof(band_card), BAND_CARD,
+             (cfg.band_mode == 3) ? sel : "",
+             (cfg.band_mode == 1) ? sel : "",
+             (cfg.band_mode == 2) ? sel : "",
+             bw2_20, bw2_40,
+             (cfg.bw_5g == 1) ? sel : "",
+             (cfg.bw_5g == 2) ? sel : "",
+             (int)cfg.rssi_5g_adj);
+#else
+    snprintf(band_card, sizeof(band_card), BAND_CARD, bw2_20, bw2_40);
+#endif
+
+    /* Render — HTML_PAGE has 17 format specifiers */
+    size_t buf_len = sizeof(HTML_PAGE) + sizeof(band_card) + 1024;
     char *buf = malloc(buf_len);
     if (!buf) {
         httpd_resp_send_500(req);
@@ -267,6 +341,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
              e_ap_ssid, e_ap_pass,
              cfg.max_clients, cfg.tx_power_dbm,
              sel_wpa, sel_wpa2, sel_mixed, sel_w2w3, sel_wpa3,
+             band_card,
              chk_clone, chk_mesh, mesh_disp,
              (int)cfg.roam_rssi_threshold, (int)cfg.roam_hysteresis);
 
@@ -280,7 +355,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 
 static esp_err_t save_post_handler(httpd_req_t *req)
 {
-    char body[512];
+    char body[1024];
     int recv = httpd_req_recv(req, body, sizeof(body) - 1);
     if (recv <= 0) {
         httpd_resp_send_500(req);
@@ -313,6 +388,25 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         if (v == 2 || v == 3 || v == 4 || v == 6 || v == 7)
             cfg.ap_authmode = v;
     }
+    /* Band & PHY */
+    if (get_field(body, "bw2g", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v == 1 || v == 2) cfg.bw_2g = (uint8_t)v;
+    }
+#if SOC_WIFI_SUPPORT_5G
+    if (get_field(body, "band", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v >= 1 && v <= 3) cfg.band_mode = (uint8_t)v;
+    }
+    if (get_field(body, "bw5g", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v == 1 || v == 2) cfg.bw_5g = (uint8_t)v;
+    }
+    if (get_field(body, "adj5g", tmp, sizeof(tmp))) {
+        int v = atoi(tmp);
+        if (v >= 0 && v <= 30) cfg.rssi_5g_adj = (uint8_t)v;
+    }
+#endif
     /* Checkboxes: present in body only when checked */
     cfg.ap_clone_ssid = get_field(body, "clone_ssid", tmp, sizeof(tmp)) ? 1 : 0;
     cfg.pseudo_mesh   = get_field(body, "pmesh", tmp, sizeof(tmp))      ? 1 : 0;
@@ -385,11 +479,28 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     /* Upstream info */
     char upstream[34] = "";
     int rssi = 0, channel = 0;
+    const char *band = "-";
+    const char *phy  = "-";
+    const char *bw   = "-";
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         strlcpy(upstream, (char *)ap.ssid, sizeof(upstream));
         rssi = ap.rssi;
         channel = ap.primary;
+        band = (ap.primary >= 36) ? "5 GHz" : "2.4 GHz";
+        phy  = ap.phy_11ax ? "WiFi6 (11ax)" :
+               ap.phy_11ac ? "WiFi5 (11ac)" :
+               ap.phy_11n  ? "WiFi4 (11n)"  :
+               ap.phy_11a  ? "11a" :
+               ap.phy_11g  ? "11g" :
+               ap.phy_11b  ? "11b" : "Legacy";
+        switch (ap.bandwidth) {
+        case WIFI_BW20:  bw = "20 MHz";  break;
+        case WIFI_BW40:  bw = "40 MHz";  break;
+        case WIFI_BW80:  bw = "80 MHz";  break;
+        case WIFI_BW160: bw = "160 MHz"; break;
+        default:         bw = "?";       break;
+        }
     }
 
     /* STA MAC */
@@ -418,9 +529,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     snprintf(json, sizeof(json),
         "{\"state\":\"%s\",\"upstream\":\"%s\",\"rssi\":%d,\"channel\":%d,"
+        "\"band\":\"%s\",\"phy\":\"%s\",\"bw\":\"%s\","
         "\"sta_mac\":\"%s\",\"cloned\":%s,\"clients\":%d,"
         "\"forwarding\":%s,\"ip\":\"%s\",\"uptime\":%lld}",
         state_str, upstream, rssi, channel,
+        band, phy, bw,
         mac_str, s_mac_cloned ? "true" : "false", clients,
         s_forwarding_active ? "true" : "false", ip_str, (long long)uptime);
 

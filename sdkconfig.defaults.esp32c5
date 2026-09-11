@@ -1,0 +1,37 @@
+# ESP32-C5 specific: WiFi 6 (HE) dual-band 2.4 GHz + 5 GHz,
+# single-core RISC-V @ 240 MHz + LP core, 4 MB flash on the DevKit.
+#
+# Buffer/AMPDU values mirror ESP-IDF's own iperf example
+# (examples/wifi/iperf/sdkconfig.defaults.esp32c5) — those are the numbers
+# Espressif uses to publish the C5 throughput figures.
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# ── WiFi driver buffers (throughput critical, C5-tuned) ──
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=20
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=48
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=48
+
+# ── AMPDU windows: bigger BA window pays off on 5 GHz / HE ──
+CONFIG_ESP_WIFI_TX_BA_WIN=32
+CONFIG_ESP_WIFI_RX_BA_WIN=22
+
+# ── C5 WiFi lib is not built with the sleep IRAM opt ──
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+
+# ── lwIP: core locking removes a task switch per packet ──
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y
+CONFIG_LWIP_TCPIP_CORE_LOCKING_INPUT=y
+CONFIG_LWIP_IP_REASS_MAX_PBUFS=15
+
+# ── Console ──
+# The DevKit exposes only USB-Serial/JTAG, no UART bridge. Without this the
+# app's ESP_LOGx output goes to the physical UART0 pins and you see nothing
+# over USB except the ROM/bootloader messages.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ── Flash: DevKit-C5 ships 4 MB, QIO @ 80 MHz ──
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

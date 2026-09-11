@@ -52,4 +52,8 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # ── Log level ──
-CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+# INFO: boot prints band mode / bandwidth / negotiated PHY, which is what you
+# need to confirm a 5 GHz + HE link. None of the ESP_LOGI calls sit in the
+# per-packet hot path (macnat_learn only logs on a new table entry), so the
+# throughput cost is negligible. Set WARN if you want an absolutely quiet UART.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

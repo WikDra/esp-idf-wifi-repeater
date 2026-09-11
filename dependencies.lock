@@ -2,9 +2,9 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 6.1.0
 direct_dependencies:
 - idf
-manifest_hash: a7561d57b91bd30f534e93fc49b6abfaa887655cfc6ccef2c017531b71e5a72b
-target: esp32c6
-version: 2.0.0
+manifest_hash: ae3324250fea042545ad9bfd8d19284a37fcc955e18c97f25581402bc15b1136
+target: esp32c5
+version: 3.0.0
