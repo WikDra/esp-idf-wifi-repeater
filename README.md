@@ -47,11 +47,25 @@ Configurable via `menuconfig` or the web GUI:
 | Setting | Default | Notes |
 |---|---|---|
 | Band mode | 2.4 GHz + 5 GHz (auto) | or 2.4 GHz only / 5 GHz only |
-| 2.4 GHz bandwidth | 20 MHz | keeps HE (11ax); 2.4 GHz is usually congested |
-| 5 GHz bandwidth | 40 MHz | measured 46% faster than HE20, at the cost of 11ax |
+| 2.4 GHz bandwidth | 20 MHz | 40 MHz works here and is faster — see below |
+| 5 GHz bandwidth | 20 MHz | **do not use 40 MHz**, it breaks client association |
 | Prefer 5 GHz margin | 10 dB | a 5 GHz AP with the same SSID wins unless its RSSI is more than this many dB worse |
 
-### 40 MHz or 11ax — pick one
+### 5 GHz SoftAP must stay at 20 MHz
+
+Verified on a C5 with a Pixel 7: with the SoftAP on 5 GHz at 40 MHz the client
+associates and is then dropped after about four seconds, every single time:
+
+```
+I wifi:station: ... join, AID=1, an, 40D
+I wifi:station: ... leave, AID = 1, reason = 15
+```
+
+`reason 15` is `4WAY_HANDSHAKE_TIMEOUT` — association succeeds but the WPA2 key
+exchange never completes. Changing only the channel width to 20 MHz makes the
+same phone connect on the first attempt. 40 MHz at 2.4 GHz is fine.
+
+### 40 MHz or 11ax — and why the AP only ever does 11n
 
 40 MHz and HE/VHT are **mutually exclusive** in the ESP WiFi driver: it accepts
 `WIFI_BW40` only when neither `11AX` nor `11AC` is in that band's protocol mask.
@@ -61,21 +75,21 @@ The driver says so itself while starting the SoftAP:
 W wifi:11ax/11ac mode can not work under phy bw 40M, the softap 5G bandwidth changed to 20M
 ```
 
-Selecting 40 MHz in menuconfig or the GUI therefore makes the firmware drop
-11ax/11ac from that band's mask automatically and log a warning.
+Selecting 40 MHz therefore makes the firmware drop 11ax/11ac from that band's
+mask automatically and log a warning.
 
-Which one is faster is a measured question, and on the C5 the wider channel wins:
+In practice the choice matters less than it looks, because **the SoftAP appears
+not to offer HE at all**: clients associate as `an` (802.11a/n) and a Pixel 7
+reports a 65 Mbps link at 20 MHz, which is 11n HT20 MCS7 — HE20 would be 86 Mbps
+or more. ESP-IDF does not document this either way, so treat it as an
+observation. The consequence is that client-side throughput tracks channel width
+only:
 
-| Configuration | PHY rate @ 1 stream | Through the bridge |
+| AP configuration | Client link | Through the bridge |
 |---|---|---|
-| HE20 (20 MHz + 11ax) | 143 Mbps | 28 Mbps |
-| HT40 (40 MHz + 11n) | 150 Mbps | **41 Mbps** |
-
-The PHY rates are nearly identical, so the +46% comes from airtime, not from the
-nominal rate. That is why 5 GHz defaults to 40 MHz here. 2.4 GHz stays at 20 MHz
-because that band is usually crowded, where a 40 MHz channel loses more to
-interference than it gains in width — flip it in the GUI if your 2.4 GHz is
-quiet.
+| 2.4 GHz, 40 MHz | 150 Mbps | **41 Mbps** — fastest working setup |
+| 2.4 GHz, 20 MHz | 72 Mbps | 28 Mbps |
+| 5 GHz, 20 MHz | 65 Mbps | 5 GHz cannot use 40 MHz |
 
 ## Web GUI
 

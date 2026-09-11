@@ -350,6 +350,45 @@ W wifi:11ax/11ac mode can not work under phy bw 40M, the softap 5G bandwidth cha
 Kod utrzymuje tę zależność automatycznie dla STA: wybór 40 MHz dla danego pasma
 zdejmuje z jego maski 11ax/11ac i loguje ostrzeżenie.
 
+### Reguła nr 4: w 5 GHz SoftAP MUSI mieć 20 MHz
+
+Zweryfikowane na sprzęcie (C5 + Pixel 7). Przy SoftAP w 5 GHz i 40 MHz klient
+kojarzy się poprawnie, a po ~4 s jest wyrzucany:
+
+```
+I wifi:station: 32:f1:8c:11:0a:da join, AID=1, an, 40D
+I wifi:station: 32:f1:8c:11:0a:da leave, AID = 1, reason = 15
+```
+
+`reason 15` to `4WAY_HANDSHAKE_TIMEOUT` — kojarzenie przechodzi, ale uzgadnianie
+kluczy WPA2 nie. Powtarzalne w 100% prób. Po zmianie tylko szerokości kanału na
+20 MHz ten sam telefon łączy się od pierwszego razu:
+
+```
+I wifi:station: 32:f1:8c:11:0a:da join, AID=1, an, 20
+I wifi6_rep: -> Client joined: ... === MAC CLONE ... === BRIDGE ACTIVE ===
+```
+
+Dlatego domyślne 5 GHz to 20 MHz, a wybór 40 MHz loguje wyraźne ostrzeżenie.
+W 2.4 GHz 40 MHz działa poprawnie.
+
+### Obserwacja: SoftAP wydaje się nie oferować HE
+
+Mimo maski protokołów z `WIFI_PROTOCOL_11AX`, klienci kojarzą się z naszym AP
+jako `an` (802.11a/n), a Pixel raportuje 65 Mb/s przy 20 MHz — czyli 11n HT20
+MCS7. Przy HE20 powinno być ~86 Mb/s lub więcej. To sugeruje, że HE działa tylko
+po stronie STA (upstream), a SoftAP kończy na 802.11n.
+
+Dokumentacja IDF tego nie stwierdza wprost, więc traktuj to jako obserwację.
+Konsekwencja praktyczna jest jednak konkretna: **przepustowość do klienta
+zależy tylko od szerokości kanału**, bo tryb i tak jest 11n:
+
+| Konfiguracja AP | Link klienta | Uwaga |
+|---|---|---|
+| 2.4 GHz, 40 MHz | 150 Mb/s | najszybsze działające |
+| 5 GHz, 20 MHz | 65 Mb/s | 5 GHz nie może mieć 40 MHz (reguła 4) |
+| 2.4 GHz, 20 MHz | 72 Mb/s | |
+
 ### Dlaczego domyślnie 20 MHz w obu pasmach
 
 | Konfiguracja | PHY rate @ 1SS |

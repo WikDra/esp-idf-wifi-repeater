@@ -182,30 +182,31 @@ menu "WiFi Repeater Configuration"
         choice REPEATER_BW_5G
             prompt "5 GHz bandwidth (default)"
             depends on SOC_WIFI_SUPPORT_5G
-            default REPEATER_BW_5G_40
+            default REPEATER_BW_5G_20
             help
-                40 MHz wyłącza 11ax/11ac w tym pasmie (firmware zdejmie je
-                z maski protokołów), ale ZMIERZONE na ESP32-C5 przez bridge:
+                ZOSTAW 20 MHz. Zweryfikowane na ESP32-C5: SoftAP pracujący
+                w 5 GHz przy 40 MHz psuje 4-way handshake WPA2 — klient
+                kojarzy się, a po ~4 s jest wyrzucany z reason 15
+                (4WAY_HANDSHAKE_TIMEOUT), i to za każdym razem. Po zejściu na
+                20 MHz ten sam telefon łączy się od pierwszej próby.
 
-                    HE20 (20 MHz + 11ax) -> 28 Mb/s
-                    HT40 (40 MHz + 11n)  -> 41 Mb/s
+                20 MHz w 5 GHz ma tę zaletę, że zachowuje 11ax/11ac, czyli
+                pracujesz w HE20.
 
-                Czyli szerszy kanał wygrywa mimo utraty HE. W 5 GHz kanały są
-                szerokie i mało zajęte, więc 40 MHz jest tu domyślne.
-                Wybierz 20 MHz, jeśli zależy Ci na OFDMA/MU-MIMO albo pracujesz
-                w bardzo zagęszczonym środowisku.
+                40 MHz warto włączać w 2.4 GHz, gdzie działa poprawnie i daje
+                zmierzone 41 Mb/s przez bridge (wobec 28 Mb/s przy HE20).
 
             config REPEATER_BW_5G_20
-                bool "20 MHz (HE20 / WiFi 6 aktywne)"
+                bool "20 MHz (HE20, 11ax — zalecane)"
             config REPEATER_BW_5G_40
-                bool "40 MHz (11a/11n, bez 11ax/11ac — szybsze)"
+                bool "40 MHz (psuje kojarzenie klientów — nie używać)"
         endchoice
 
         config REPEATER_BW_5G_VAL
             int
             default 1 if REPEATER_BW_5G_20
             default 2 if REPEATER_BW_5G_40
-            default 2
+            default 1
     endmenu
 
     menu "HTTP Configuration Server"

@@ -64,6 +64,7 @@ ENTRIES_PER_PAGE = 126
 
 ENTRY_WRITTEN = 0b10
 NVS_TYPE_U8 = 0x01
+NVS_TYPE_STR = 0x21
 
 
 def _entry_state(bitmap, index):
@@ -72,42 +73,67 @@ def _entry_state(bitmap, index):
     return (byte >> ((index % 4) * 2)) & 0b11
 
 
+def _iter_entries(blob):
+    """Yield (page_seqno, entry_index, entry_bytes, all_entries) for WRITTEN entries."""
+    for page_start in range(0, len(blob) - PAGE_SIZE + 1, PAGE_SIZE):
+        page = blob[page_start:page_start + PAGE_SIZE]
+        if int.from_bytes(page[0:4], "little") == 0xFFFFFFFF:
+            continue                      # uninitialised page
+        seqno = int.from_bytes(page[4:8], "little")
+        bitmap = page[HEADER_SIZE:HEADER_SIZE + BITMAP_SIZE]
+        entries = page[HEADER_SIZE + BITMAP_SIZE:]
+        for i in range(ENTRIES_PER_PAGE):
+            if _entry_state(bitmap, i) != ENTRY_WRITTEN:
+                continue
+            e = entries[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE]
+            if len(e) == ENTRY_SIZE:
+                yield seqno, i, e, entries
+
+
 def find_u8(blob, key):
-    """Return the current value of a u8 NVS entry, or None.
+    """Current value of a u8 NVS entry, or None.
 
     Walks the NVS pages properly instead of grepping: only entries the state
     bitmap marks as WRITTEN count, and pages are ordered by their sequence
     number so a compacted page cannot hand back a stale value.
     """
     key_bytes = key.encode()
-    best = None          # (page_seqno, entry_index, value)
-
-    for page_start in range(0, len(blob) - PAGE_SIZE + 1, PAGE_SIZE):
-        page = blob[page_start:page_start + PAGE_SIZE]
-        page_state = int.from_bytes(page[0:4], "little")
-        if page_state == 0xFFFFFFFF:      # uninitialised page
+    best = None
+    for seqno, i, e, _ in _iter_entries(blob):
+        if e[1] != NVS_TYPE_U8:
             continue
-        seqno = int.from_bytes(page[4:8], "little")
-        bitmap = page[HEADER_SIZE:HEADER_SIZE + BITMAP_SIZE]
-        entries = page[HEADER_SIZE + BITMAP_SIZE:]
+        if e[8:24].split(b"\x00")[0] != key_bytes:
+            continue
+        if best is None or (seqno, i) > best[:2]:
+            best = (seqno, i, e[24])
+    return None if best is None else best[2]
 
-        for i in range(ENTRIES_PER_PAGE):
-            if _entry_state(bitmap, i) != ENTRY_WRITTEN:
-                continue
-            e = entries[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE]
-            if len(e) < ENTRY_SIZE or e[1] != NVS_TYPE_U8:
-                continue
-            if e[8:24].split(b"\x00")[0] != key_bytes:
-                continue
-            cand = (seqno, i, e[24])
-            if best is None or cand[:2] > best[:2]:
-                best = cand
 
+def find_str(blob, key):
+    """Current value of a string NVS entry, or None.
+
+    A string occupies several entries: the first carries the key and the byte
+    count, the payload follows in the next `span - 1` entries.
+    """
+    key_bytes = key.encode()
+    best = None
+    for seqno, i, e, entries in _iter_entries(blob):
+        if e[1] != NVS_TYPE_STR:
+            continue
+        if e[8:24].split(b"\x00")[0] != key_bytes:
+            continue
+        size = int.from_bytes(e[24:26], "little")
+        span = e[2]
+        payload = entries[(i + 1) * ENTRY_SIZE:(i + span) * ENTRY_SIZE]
+        value = payload[:max(size - 1, 0)].decode("utf-8", errors="replace")
+        if best is None or (seqno, i) > best[:2]:
+            best = (seqno, i, value)
     return None if best is None else best[2]
 
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else "COM3"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    port = args[0] if args else "COM3"
     blob = read_nvs(port)
 
     stage = find_u8(blob, "bootstg")
@@ -125,6 +151,25 @@ def main():
               "comes up in PHY SAFE MODE")
     else:
         print("phy guard  : clear -- radio config completed successfully")
+
+    if "--config" in sys.argv:
+        print("\n-- saved config (NVS overrides menuconfig defaults) --")
+        for key, label in (("sta_ssid", "upstream SSID"), ("ap_ssid", "repeater SSID")):
+            val = find_str(blob, key)
+            print("{:<15}: {}".format(label, val if val is not None else "<unset, using Kconfig default>"))
+        # Passwords are deliberately not printed -- only whether one is stored
+        # and how long it is, which is enough to spot an accidental overwrite.
+        for key, label in (("sta_pass", "upstream pass"), ("ap_pass", "repeater pass")):
+            val = find_str(blob, key)
+            if val is None:
+                print("{:<15}: <unset, using Kconfig default>".format(label))
+            else:
+                print("{:<15}: {} chars stored".format(label, len(val)))
+        for key, label in (("band_mode", "band mode"), ("bw_2g", "2.4 GHz bw"),
+                           ("bw_5g", "5 GHz bw"), ("authmode", "AP authmode"),
+                           ("tx_power", "TX power dBm"), ("max_cli", "max clients")):
+            val = find_u8(blob, key)
+            print("{:<15}: {}".format(label, val if val is not None else "<unset>"))
 
 
 if __name__ == "__main__":

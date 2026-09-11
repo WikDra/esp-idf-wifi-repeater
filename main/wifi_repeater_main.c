@@ -147,6 +147,18 @@ static SemaphoreHandle_t s_mac_task_mutex;   /* zapobiega równoległym zmianom 
 #define MAC_CLONE_COOLDOWN_US (60 * 1000000LL)
 static int64_t s_clone_block_until = 0;
 
+/* Ustawiane, gdy SAMI zrzucamy klientów po wstaniu mostka (żeby odświeżyli
+ * DHCP przez router). Bez tego handler AP_STADISCONNECTED uznałby, że primary
+ * odszedł, i natychmiast cofnąłby klonowanie. Wygasa po czasie, żeby
+ * zgubiony event nie zablokował MAC RESTORE na stałe. */
+#define CLIENT_BOUNCE_WINDOW_US (10 * 1000000LL)
+static int64_t s_bounce_until = 0;
+
+static inline bool client_bounce_in_progress(void)
+{
+    return s_bounce_until && esp_timer_get_time() < s_bounce_until;
+}
+
 /* ── Backoff auto-reconnectu STA ──────────────────────────────
  * Każde esp_wifi_connect() przy band mode AUTO to skan wszystkich kanałów
  * w 2.4 i 5 GHz. C5 ma jedno radio, więc w tym czasie SoftAP schodzi z kanału
@@ -351,8 +363,12 @@ static void forwarding_stop(void)
     esp_wifi_internal_reg_rxcb(WIFI_IF_STA, NULL);
     esp_wifi_internal_reg_rxcb(WIFI_IF_AP, NULL);
     s_forwarding_active = false;
-    /* Przywróć modem sleep w trybie idle */
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    /* NIE włączamy tu modem sleep. W APSTA jedno radio podąża za harmonogramem
+     * uśpienia STA, więc SoftAP okresowo przestaje nadawać i odbierać. Ramki
+     * EAPOL 4-way handshake wpadające w okno uśpienia giną, a handshake ma
+     * limit czasu — objawia się to klientami wyrzucanymi z reason 15
+     * (4WAY_HANDSHAKE_TIMEOUT) "losowo", raz na kilka prób.
+     * Power save zostaje wyłączony na stałe, dopóki AP działa. */
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -625,6 +641,22 @@ static void mac_change_task(void *pvParams)
             s_state = STATE_BRIDGING;
             s_clone_block_until = 0;   /* udało się — zdejmij cooldown */
             /* Forwarding jest uruchamiany w STA_CONNECTED handlerze */
+
+            /* Klient skojarzył się PRZED wstaniem mostka, więc trzyma lease
+             * 192.168.4.2 z naszego serwera DHCP — bezużyteczny w podsieci
+             * routera. Klonowanie trwa ~13 s, a telefon robi DHCP od razu po
+             * skojarzeniu, więc tej kolejności nie da się wygrać wyścigiem.
+             *
+             * Rozwiązanie: gdy mostek już stoi, wyłącz nasz DHCP i zrzuć
+             * klientów. Po ponownym skojarzeniu ich DHCP przechodzi mostkiem
+             * do routera, a sniffer ACK ustawi AP na <podsieć>.254.
+             * Bez tego klient tracił łączność i sam się odłączał (reason 8),
+             * co uruchamiało MAC RESTORE i całą pętlę od nowa. */
+            esp_netif_dhcps_stop(s_ap_netif);
+            vTaskDelay(pdMS_TO_TICKS(150));
+            ESP_LOGI(TAG, "  AP DHCP off; bouncing clients so they renew via the bridge");
+            s_bounce_until = esp_timer_get_time() + CLIENT_BOUNCE_WINDOW_US;
+            esp_wifi_deauth_sta(0);   /* 0 = wszystkie stacje */
         } else {
             ESP_LOGE(TAG, "  Reconnect timeout! Restoring original MAC...");
             s_clone_block_until = esp_timer_get_time() + MAC_CLONE_COOLDOWN_US;
@@ -636,6 +668,13 @@ static void mac_change_task(void *pvParams)
             esp_wifi_set_mac(WIFI_IF_STA, s_original_sta_mac);
             s_mac_cloned = false;
             esp_netif_dhcpc_start(s_sta_netif);
+            /* Klonowanie nie wyszło, więc mostka nie będzie. Klient musi
+             * dostać adres z NASZEGO serwera DHCP i móc wejść do GUI —
+             * inaczej zostaje "uzyskiwanie adresu IP" bez końca, bo
+             * ap_mirror_sta_ip() zatrzymało dhcps podczas bridgingu. */
+            macnat_clear();
+            s_ap_ip_from_sniff = false;
+            ap_restore_management_ip();
             /* Odblokuj BSSID — pozwól na pełny scan przy fallback */
             {
                 wifi_config_t current_cfg;
@@ -902,6 +941,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 
         /* Jeśli odszedł ten klient, dla którego klonowaliśmy MAC → przywróć */
         if (s_mac_cloned && memcmp(ev->mac, s_client_mac, 6) == 0) {
+            /* ...chyba że to MY go właśnie zrzuciliśmy, żeby odświeżył DHCP
+             * przez mostek. Wtedy wróci sam za moment. */
+            if (client_bounce_in_progress()) {
+                ESP_LOGI(TAG, "   (expected — we bounced it, waiting for rejoin)");
+                break;
+            }
             /* Sprawdź ile klientów zostało (odfiltruj odchodzącego — race condition) */
             wifi_sta_list_t sta_list;
             int remaining = 0;
@@ -1056,6 +1101,19 @@ static void sniff_dhcp_ack_and_set_ap_ip(const uint8_t *data, uint16_t len)
  * Uwaga: ignoruje link-local 169.254.x.x (dummy IP z bridgingu). */
 static void ap_mirror_sta_ip(const esp_netif_ip_info_t *sta_ip)
 {
+    /* Tylko w trybie mostka. Przed sklonowaniem MAC-a AP musi zostać na
+     * 192.168.4.1 z WŁĄCZONYM serwerem DHCP, bo to jedyna droga, żeby klient
+     * dostał adres i wszedł do GUI. Wcześniej lustrowaliśmy IP już przy samym
+     * IP_EVENT_STA_GOT_IP — wtedy AP dostawało adres identyczny jak STA i
+     * traciło DHCP, więc świeżo podłączony telefon nie miał skąd wziąć IP
+     * i poddawał się na "uzyskiwanie adresu IP". */
+    if (!s_mac_cloned) {
+        ESP_LOGI(TAG, "Upstream IP " IPSTR " noted; AP stays in setup mode "
+                 "(192.168.4.1, DHCP on) until the bridge is up",
+                 IP2STR(&sta_ip->ip));
+        return;
+    }
+
     /* Skip link-local (dummy set when STA DHCP off during bridging) */
     uint8_t first_octet = esp_ip4_addr1(&sta_ip->ip);
     uint8_t second_octet = esp_ip4_addr2(&sta_ip->ip);
@@ -1250,7 +1308,26 @@ static void status_task(void *pv)
             ESP_LOGI(TAG, "  Up: %s RSSI:%d Ch:%d (%s)",
                      ap.ssid, ap.rssi, ap.primary,
                      chan_is_5g(ap.primary) ? "5 GHz" : "2.4 GHz");
-            ESP_LOGI(TAG, "  Link PHY: %s @ %s", ap_phy_str(&ap), bw_str(ap.bandwidth));
+            /* ap.bandwidth to szerokość ROZGŁASZANA przez router (widzieliśmy
+             * tam 160 MHz, czego C5 fizycznie nie potrafi), więc nie nadaje się
+             * na raport naszego łącza. Realną szerokość bierzemy z tego, co
+             * ustawiliśmy dla własnego interfejsu. */
+            const char *our_bw = "?";
+#if SOC_WIFI_SUPPORT_5G
+            {
+                wifi_bandwidths_t b;
+                if (esp_wifi_get_bandwidths(WIFI_IF_STA, &b) == ESP_OK) {
+                    our_bw = bw_str(chan_is_5g(ap.primary) ? b.ghz_5g : b.ghz_2g);
+                }
+            }
+#else
+            {
+                wifi_bandwidth_t b;
+                if (esp_wifi_get_bandwidth(WIFI_IF_STA, &b) == ESP_OK) our_bw = bw_str(b);
+            }
+#endif
+            ESP_LOGI(TAG, "  Link PHY: %s @ %s (AP advertises %s)",
+                     ap_phy_str(&ap), our_bw, bw_str(ap.bandwidth));
         } else {
             ESP_LOGW(TAG, "  Up: not connected");
         }
@@ -1578,6 +1655,10 @@ static void radio_apply_phy_config(void)
         protos.ghz_5g |= WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX;
     } else {
         ESP_LOGW(TAG, "PHY: 5 GHz 40 MHz selected — HE/VHT (11ax/11ac) disabled on 5 GHz");
+        ESP_LOGW(TAG, "PHY: WARNING — SoftAP on 5 GHz at 40 MHz is known to break the");
+        ESP_LOGW(TAG, "PHY:   WPA2 4-way handshake: clients associate, then get dropped");
+        ESP_LOGW(TAG, "PHY:   with reason 15 (4WAY_HANDSHAKE_TIMEOUT). Verified on C5 with");
+        ESP_LOGW(TAG, "PHY:   a Pixel 7 — 20 MHz associates first try. Use 20 MHz on 5 GHz.");
     }
 #endif
     ESP_LOGI(TAG, "PHY: protocols 2.4G=0x%02x 5G=0x%02x", protos.ghz_2g, protos.ghz_5g);
@@ -1812,6 +1893,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "STA started");
     repeater_boot_stage_set(4);
+
+    /* Wyłącz power save NATYCHMIAST po starcie i już go nie włączaj.
+     * IDF domyślnie ustawia WIFI_PS_MIN_MODEM, a w APSTA jedno radio podąża
+     * za harmonogramem uśpienia STA — SoftAP gubi wtedy ramki, w szczególności
+     * EAPOL, co daje klientów odrzucanych z reason 15 raz na kilka prób.
+     * Repeater i tak nie ma sensu oszczędzać energii. */
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_LOGI(TAG, "Power save: OFF (required for a reliable SoftAP)");
 
     if (!phy_safe_mode) {
         repeater_phy_guard_arm();

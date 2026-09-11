@@ -129,6 +129,16 @@ esp_err_t repeater_config_load(repeater_config_t *cfg)
     if (cfg->rssi_5g_adj > 30)                           cfg->rssi_5g_adj = 10;
 #if SOC_WIFI_SUPPORT_5G
     if (cfg->band_mode < 1 || cfg->band_mode > 3)        cfg->band_mode = 3;
+    /* 40 MHz w 5 GHz jest niesprawne: SoftAP kojarzy klienta, a po ~4 s
+     * wyrzuca go z reason 15 (4WAY_HANDSHAKE_TIMEOUT). Powtarzalne w 100%
+     * prób na C5 + Pixel 7; 20 MHz łączy od pierwszego razu. Wymuszamy więc
+     * 20 MHz nawet wtedy, gdy w NVS siedzi 40 MHz zapisane z GUI — inaczej
+     * stary wpis trwale blokowałby możliwość podłączenia klienta. */
+    if (cfg->bw_5g != 1) {
+        ESP_LOGW(TAG, "5 GHz bandwidth 40 MHz from NVS ignored: it breaks the WPA2 "
+                      "4-way handshake on SoftAP. Forcing 20 MHz (HE20).");
+        cfg->bw_5g = 1;
+    }
 #else
     cfg->band_mode = 1;   /* SoC bez 5 GHz: zawsze 2.4 GHz only */
     cfg->bw_5g     = 1;
